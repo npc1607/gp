@@ -11,6 +11,7 @@ import (
 	"gp/internal/ai"
 	"gp/internal/ai/providers/openai"
 	"gp/internal/core/storage/sqlite"
+	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
 	"gp/internal/tools/builtin"
 )
@@ -40,6 +41,17 @@ type PrintRunner struct {
 func (p *PrintRunner) Run(ctx context.Context, prompt string) error {
 	runner := print.NewRunner(p.Opts)
 	return runner.Run(ctx, prompt)
+}
+
+// InteractiveRunner Interactive TUI 模式运行器
+type InteractiveRunner struct {
+	Opts interactive.RunnerOptions
+}
+
+// Run 执行 Interactive 模式
+func (i *InteractiveRunner) Run(ctx context.Context, initialPrompt string) error {
+	runner := interactive.NewRunner(i.Opts)
+	return runner.Run(ctx, initialPrompt)
 }
 
 // ResumeRunnerOptions 断点恢复运行器参数

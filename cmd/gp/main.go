@@ -9,8 +9,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/mattn/go-isatty"
 	"gp/internal/core/settings"
 	"gp/internal/modes"
+	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
 )
 
@@ -160,6 +162,29 @@ func main() {
 
 		if err := runner.Run(ctx, prompt); err != nil {
 			fmt.Fprintf(os.Stderr, "运行错误: %v\n", err)
+			os.Exit(1)
+		}
+
+	case modes.ModeInteractive:
+		if !isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+			fmt.Printf("gp %s | 模式: %s | 模型: %s\n", Version, activeMode, modelName)
+			fmt.Println("提示: 核心骨架已就绪，等待后续模块装配...")
+			return
+		}
+
+		runner := &modes.InteractiveRunner{
+			Opts: interactive.RunnerOptions{
+				ModelName:     modelName,
+				ToolAllowlist: allowlist,
+				DBPath:        *flagDB,
+				Settings:      cfg,
+				SettingsMgr:   settingsMgr,
+				InitialPrompt: prompt,
+			},
+		}
+
+		if err := runner.Run(ctx, prompt); err != nil {
+			fmt.Fprintf(os.Stderr, "交互运行错误: %v\n", err)
 			os.Exit(1)
 		}
 

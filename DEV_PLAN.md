@@ -180,15 +180,15 @@ gantt
 
 > **阶段目标**：打造丝滑、防闪烁、多任务泳道可视化的现代化终端交互体验。
 
-- [ ] **Task 4.1：Bubbletea 核心消息驱动模型（`internal/tui`）**
+- [x] **Task 4.1：Bubbletea 核心消息驱动模型（`internal/tui`）**
   - 确立 TEA 单向数据流架构，严禁协程直接写 stdout；
   - 引入 30 FPS 批量双缓冲刷新时钟（FPS Throttler），消除高频 Token 造成的终端闪烁。
-- [ ] **Task 4.2：独立虚拟屏幕缓冲区（Per-Agent Virtual Buffer）**
+- [x] **Task 4.2：独立虚拟屏幕缓冲区（Per-Agent Virtual Buffer）**
   - 为每个并发 Agent 分配独立的 Viewport 模型，彻底杜绝日志交织混乱；
   - 支持 `Tab` 键或快捷键平滑切换活跃 Agent 视口。
-- [ ] **Task 4.3：多任务动态悬浮托盘（Active Coroutine Tray）**
+- [x] **Task 4.3：多任务动态悬浮托盘（Active Coroutine Tray）**
   - 屏幕底端固定悬浮渲染当前活跃的子协程摘要、动态 Spinner 旋转动画与执行耗时。
-- [ ] **Task 4.4：分栏双拼与 DAG 树状进度呈现**
+- [x] **Task 4.4：分栏双拼与 DAG 树状进度呈现**
   - 左侧 35% 渲染当前 DAG 任务树拓扑与状态徽标（`[RUNNING]`, `[BLOCKED]`, `[REPAIR]`, `[DONE]`）；
   - 右侧 65% 渲染当前聚焦 Agent 的详细 Diff 与代码生成现场。
 - **阶段验收标准（Gate M4）**：

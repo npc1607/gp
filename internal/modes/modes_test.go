@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"gp/internal/ai"
+	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
 )
 
@@ -71,5 +72,24 @@ func TestResumeRunner_NoUnfinished(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "No unfinished tasks") {
 		t.Fatalf("expected 'No unfinished tasks' message, got %q", buf.String())
+	}
+}
+
+func TestInteractiveRunner_Contract(t *testing.T) {
+	mock := &mockProvider{
+		chunks: []ai.StreamChunk{
+			{DeltaText: "hello from interactive runner"},
+		},
+	}
+	var runner Runner = &InteractiveRunner{
+		Opts: interactive.RunnerOptions{
+			Provider: mock,
+			Headless: true,
+		},
+	}
+
+	err := runner.Run(context.Background(), "interactive test")
+	if err != nil {
+		t.Fatalf("expected nil error from interactive runner in headless mode, got: %v", err)
 	}
 }

@@ -192,3 +192,60 @@ func TestCLI_DefaultStartupModel(t *testing.T) {
 		t.Fatalf("output %q does not contain expected default model %q", string(out), expectedSub)
 	}
 }
+
+// TC-TUI-012: 非 TTY 终端模式降级
+func TestCLI_TC_TUI_012_NonTTYFallback(t *testing.T) {
+	fn := "cmd/gp.InteractiveNonTTYFallback"
+	binPath := buildBinary(t)
+
+	tests := []struct {
+		name      string
+		args      []string
+		wantMode  string
+		wantModel string
+		wantHint  string
+	}{
+		{
+			name:      "interactive_with_custom_model",
+			args:      []string{"--mode", "interactive", "-model", "custom-interactive-model"},
+			wantMode:  "模式: interactive",
+			wantModel: "模型: custom-interactive-model",
+			wantHint:  "提示: 核心骨架已就绪，等待后续模块装配...",
+		},
+		{
+			name:      "interactive_default_fallback",
+			args:      []string{"--mode", "interactive"},
+			wantMode:  "模式: interactive",
+			wantModel: "模型: antigravity/gemini-4-argon",
+			wantHint:  "提示: 核心骨架已就绪，等待后续模块装配...",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			cmd := exec.Command(binPath, tc.args...)
+			cmd.Env = append(cmd.Environ(), "GP_MODEL=", "PI_MODEL=")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s(inputs=%+v): exec got error %v, output: %s", fn, tc.args, err, string(out))
+			}
+
+			outputStr := string(out)
+			if !strings.Contains(outputStr, tc.wantMode) {
+				t.Fatalf("%s(inputs=%+v): output %q does not contain wantMode %q", fn, tc.args, outputStr, tc.wantMode)
+			}
+			if !strings.Contains(outputStr, tc.wantModel) {
+				t.Fatalf("%s(inputs=%+v): output %q does not contain wantModel %q", fn, tc.args, outputStr, tc.wantModel)
+			}
+			if !strings.Contains(outputStr, tc.wantHint) {
+				t.Fatalf("%s(inputs=%+v): output %q does not contain wantHint %q", fn, tc.args, outputStr, tc.wantHint)
+			}
+		})
+	}
+}
+
+func TestCLI_InteractiveModeFallback(t *testing.T) {
+	TestCLI_TC_TUI_012_NonTTYFallback(t)
+}
