@@ -159,16 +159,16 @@ gantt
 
 > **阶段目标**：实现 Goroutine 轻量子 Agent、全局资源调度器、共享黑板与 DAG 依赖触发引擎。
 
-- [ ] **Task 3.1：全局资源调度器（`internal/scheduler/governor.go`）**
+- [x] **Task 3.1：全局资源调度器（`internal/scheduler/governor.go`）**
   - 基于缓冲 Channel 实现高精度并发信号量（限制并行协程总数）；
   - 基于滑动窗口实现全局 Token 桶限流器（动态平滑 TPM/RPM 预算，彻底杜绝 429）。
-- [ ] **Task 3.2：动态元工具 `subagent`（LLM 自动触发）**
+- [x] **Task 3.2：动态元工具 `subagent`（LLM 自动触发）**
   - 向主 LLM 暴露 `subagent` 工具元数据；
   - 执行器捕获后，通过 `errgroup` 动态为 `tasks` 数组**并发启动轻量 Goroutine**；
   - 单协程内注入纯内存 `Session`（内存 < 1MB）与裁剪后的最小化工具集。
-- [ ] **Task 3.3：多 Agent 共享黑板（`internal/scheduler/blackboard.go`）**
+- [x] **Task 3.3：多 Agent 共享黑板（`internal/scheduler/blackboard.go`）**
   - 线程安全 KV 共享空间，Scout 沉淀的事实数据，自动供 Planner / Reviewer 按需拉取。
-- [ ] **Task 3.4：DAG 依赖图与自愈闭环（`internal/scheduler/dag.go`）**
+- [x] **Task 3.4：DAG 依赖图与自愈闭环（`internal/scheduler/dag.go`）**
   - 实现基于 `doneChan` 拓扑排序的 DAG 依赖唤醒引擎；
   - **自愈回路（Repair Loop）**：当 Verifier 测试失败时，自动重置 Implementer 并将错误日志作为输入重新触发修复，内置**两轮原则熔断器**。
 - **阶段验收标准（Gate M3）**：

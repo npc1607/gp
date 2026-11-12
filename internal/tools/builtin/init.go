@@ -13,6 +13,8 @@ func RegisterAll(r *tools.Registry) error {
 		&WriteTool{},
 		&EditTool{},
 		&BashTool{},
+		NewSubagentTool(nil, r, nil),
+		NewAskPeerTool(nil),
 	}
 
 	for _, t := range builtins {
