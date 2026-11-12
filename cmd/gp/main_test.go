@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -133,5 +134,61 @@ func TestCLI_TC_CLI_01_ResumeCommandAndFlags(t *testing.T) {
 	}
 	if !strings.Contains(string(outFlag), "No unfinished tasks found to resume.") {
 		t.Fatalf("%s: exec output %q does not contain expected graceful exit message", fn, string(outFlag))
+	}
+}
+
+// TC-CLI-001: CLI启动缺省标志位回退生效
+func TestCLI_TC_CLI_001_DefaultFlagFallback(t *testing.T) {
+	fn := "main(CLI DefaultFlagFallback)"
+	binPath := buildBinary(t)
+	tmpDir := t.TempDir()
+
+	// 注入项目配置
+	gpDir := filepath.Join(tmpDir, ".gp")
+	if err := os.MkdirAll(gpDir, 0755); err != nil {
+		t.Fatalf("%s: mkdir %s failed: %v", fn, gpDir, err)
+	}
+	settingsContent := `{
+		"model": "project-configured-model",
+		"default_tools": ["read", "bash"]
+	}`
+	if err := os.WriteFile(filepath.Join(gpDir, "settings.json"), []byte(settingsContent), 0644); err != nil {
+		t.Fatalf("%s: write project settings failed: %v", fn, err)
+	}
+
+	inputs := map[string]interface{}{
+		"cwd":           tmpDir,
+		"settingsModel": "project-configured-model",
+		"args":          []string{},
+	}
+
+	cmd := exec.Command(binPath)
+	cmd.Dir = tmpDir
+	cmd.Env = append(cmd.Environ(), "GP_MODEL=", "PI_MODEL=")
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s(inputs=%+v): exec got error %v, output: %s", fn, inputs, err, string(out))
+	}
+
+	wantModelSubstr := "模型: project-configured-model"
+	if !strings.Contains(string(out), wantModelSubstr) {
+		t.Fatalf("%s(inputs=%+v): output %q does not contain expected model %q", fn, inputs, string(out), wantModelSubstr)
+	}
+}
+
+func TestCLI_DefaultStartupModel(t *testing.T) {
+	binPath := buildBinary(t)
+
+	cmd := exec.Command(binPath)
+	cmd.Env = append(cmd.Environ(), "GP_MODEL=", "PI_MODEL=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("exec %s got error %v, output: %s", binPath, err, string(out))
+	}
+
+	expectedSub := "模型: antigravity/gemini-4-argon"
+	if !strings.Contains(string(out), expectedSub) {
+		t.Fatalf("output %q does not contain expected default model %q", string(out), expectedSub)
 	}
 }

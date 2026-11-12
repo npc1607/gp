@@ -11,13 +11,15 @@ import (
 	"gp/internal/ai"
 	"gp/internal/ai/providers/openai"
 	"gp/internal/core/session"
+	"gp/internal/core/settings"
 	"gp/internal/core/storage"
 	"gp/internal/core/storage/sqlite"
+	"gp/internal/tools"
 	"gp/internal/tools/builtin"
 	"time"
 )
 
-const defaultModel = "antigravity/gemini-4-argon"
+const defaultModel = settings.DefaultModel
 
 // RunnerOptions 配置 Print 模式的参数
 type RunnerOptions struct {
@@ -30,6 +32,8 @@ type RunnerOptions struct {
 	ToolAllowlist []string
 	Writer        io.Writer
 	Provider      ai.Provider
+	SettingsMgr   *settings.Manager
+	Settings      *settings.Settings
 }
 
 // Runner Print 模式运行器
@@ -49,10 +53,6 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 		return fmt.Errorf("prompt is required in print mode")
 	}
 
-	modelName := r.resolveModelName()
-	baseURL := r.resolveBaseURL()
-	apiKey := r.resolveAPIKey()
-
 	cwd := r.opts.Cwd
 	if cwd == "" {
 		if dir, err := os.Getwd(); err == nil {
@@ -61,6 +61,12 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 			cwd = "."
 		}
 	}
+
+	cfg := r.resolveSettings(cwd)
+
+	modelName := r.resolveModelName(cfg)
+	baseURL := r.resolveBaseURL(cfg)
+	apiKey := r.resolveAPIKey(cfg)
 
 	outWriter := r.opts.Writer
 	if outWriter == nil {
@@ -72,12 +78,9 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 		prov = openai.NewProvider(apiKey, baseURL)
 	}
 
-	reg, err := builtin.NewDefaultRegistry()
+	reg, err := r.resolveRegistry(cwd, cfg)
 	if err != nil {
-		return fmt.Errorf("initialize builtin tools: %w", err)
-	}
-	if len(r.opts.ToolAllowlist) > 0 {
-		reg = reg.ScopedRegistry(r.opts.ToolAllowlist)
+		return fmt.Errorf("resolve registry: %w", err)
 	}
 
 	ag := agent.NewAgent("cli-print", "assistant", prov, modelName, reg)
@@ -126,9 +129,49 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 	return nil
 }
 
-func (r *Runner) resolveModelName() string {
+func (r *Runner) resolveRegistry(cwd string, cfg *settings.Settings) (*tools.Registry, error) {
+	reg, err := builtin.NewDefaultRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("initialize builtin tools: %w", err)
+	}
+	allowlist := r.opts.ToolAllowlist
+	if len(allowlist) == 0 && cfg != nil && len(cfg.DefaultTools) > 0 {
+		allowlist = cfg.DefaultTools
+	}
+	if len(allowlist) > 0 {
+		reg = reg.ScopedRegistry(allowlist)
+	}
+	return reg, nil
+}
+
+func (r *Runner) resolveSettings(cwd string) *settings.Settings {
+	if r.opts.Settings != nil {
+		s := r.opts.Settings.Clone()
+		return &s
+	}
+	mgr := r.opts.SettingsMgr
+	if mgr == nil {
+		mgr = settings.NewManager(cwd)
+	}
+	if cfg, err := mgr.Load(); err == nil {
+		return cfg
+	}
+	d := settings.DefaultSettings()
+	return &d
+}
+
+func (r *Runner) resolveModelName(cfg ...*settings.Settings) string {
+	var c *settings.Settings
+	if len(cfg) > 0 {
+		c = cfg[0]
+	} else {
+		c = r.resolveSettings(r.opts.Cwd)
+	}
 	if r.opts.ModelName != "" {
 		return r.opts.ModelName
+	}
+	if c != nil && c.Model != "" {
+		return c.Model
 	}
 	if val := os.Getenv("GP_MODEL"); val != "" {
 		return val
@@ -139,9 +182,18 @@ func (r *Runner) resolveModelName() string {
 	return defaultModel
 }
 
-func (r *Runner) resolveBaseURL() string {
+func (r *Runner) resolveBaseURL(cfg ...*settings.Settings) string {
+	var c *settings.Settings
+	if len(cfg) > 0 {
+		c = cfg[0]
+	} else {
+		c = r.resolveSettings(r.opts.Cwd)
+	}
 	if r.opts.BaseURL != "" {
 		return r.opts.BaseURL
+	}
+	if c != nil && c.BaseURL != "" {
+		return c.BaseURL
 	}
 	if val := os.Getenv("GP_BASE_URL"); val != "" {
 		return val
@@ -149,12 +201,21 @@ func (r *Runner) resolveBaseURL() string {
 	if val := os.Getenv("OPENAI_BASE_URL"); val != "" {
 		return val
 	}
-	return "https://api.openai.com/v1"
+	return settings.DefaultBaseURL
 }
 
-func (r *Runner) resolveAPIKey() string {
+func (r *Runner) resolveAPIKey(cfg ...*settings.Settings) string {
+	var c *settings.Settings
+	if len(cfg) > 0 {
+		c = cfg[0]
+	} else {
+		c = r.resolveSettings(r.opts.Cwd)
+	}
 	if r.opts.APIKey != "" {
 		return r.opts.APIKey
+	}
+	if c != nil && c.APIKey != "" {
+		return c.APIKey
 	}
 	if val := os.Getenv("GP_API_KEY"); val != "" {
 		return val

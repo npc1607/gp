@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"gp/internal/core/settings"
 	"gp/internal/modes"
 	"gp/internal/modes/print"
 )
@@ -29,7 +30,19 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// 1. 处理 resume 子命令 (如: gp resume [session_id] [-db ...] [-model ...])
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	settingsMgr := settings.NewManager(cwd)
+	cfg, err := settingsMgr.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 加载配置文件失败 (%v)，使用默认配置\n", err)
+		defaultCfg := settings.DefaultSettings()
+		cfg = &defaultCfg
+	}
+
+	// 1. 处理 resume 子命令 (如: gp resume [session_id] [-db ...] [-model ...] [-tools ...])
 	if len(os.Args) > 1 && os.Args[1] == "resume" {
 		resumeCmd := flag.NewFlagSet("resume", flag.ExitOnError)
 		resumeDB := resumeCmd.String("db", ".gp/gp.db", "SQLite 数据库路径")
@@ -49,13 +62,20 @@ func main() {
 					allowlist = append(allowlist, trimmed)
 				}
 			}
+		} else if len(cfg.DefaultTools) > 0 {
+			allowlist = append(allowlist, cfg.DefaultTools...)
+		}
+
+		modelName := *resumeModel
+		if modelName == "" {
+			modelName = cfg.Model
 		}
 
 		runner := &modes.ResumeRunner{
 			Opts: modes.ResumeRunnerOptions{
 				DBPath:        *resumeDB,
 				SessionID:     targetSession,
-				ModelName:     *resumeModel,
+				ModelName:     modelName,
 				ToolAllowlist: allowlist,
 			},
 		}
@@ -72,6 +92,11 @@ func main() {
 	if *flagVersion {
 		fmt.Printf("gp (Go Coding Agent Harness) %s\n", Version)
 		return
+	}
+
+	modelName := *flagModel
+	if modelName == "" {
+		modelName = cfg.Model
 	}
 
 	activeMode := modes.Mode(*flagMode)
@@ -92,6 +117,8 @@ func main() {
 				allowlist = append(allowlist, trimmed)
 			}
 		}
+	} else if len(cfg.DefaultTools) > 0 {
+		allowlist = append(allowlist, cfg.DefaultTools...)
 	}
 
 	switch activeMode {
@@ -105,7 +132,7 @@ func main() {
 			Opts: modes.ResumeRunnerOptions{
 				DBPath:        *flagDB,
 				SessionID:     targetSession,
-				ModelName:     *flagModel,
+				ModelName:     modelName,
 				ToolAllowlist: allowlist,
 			},
 		}
@@ -123,9 +150,11 @@ func main() {
 
 		runner := &modes.PrintRunner{
 			Opts: print.RunnerOptions{
-				ModelName:     *flagModel,
+				ModelName:     modelName,
 				ToolAllowlist: allowlist,
 				DBPath:        *flagDB,
+				Settings:      cfg,
+				SettingsMgr:   settingsMgr,
 			},
 		}
 
@@ -135,7 +164,7 @@ func main() {
 		}
 
 	default:
-		fmt.Printf("gp %s | 模式: %s | 模型: %s\n", Version, activeMode, *flagModel)
+		fmt.Printf("gp %s | 模式: %s | 模型: %s\n", Version, activeMode, modelName)
 		fmt.Println("提示: 核心骨架已就绪，等待后续模块装配...")
 	}
 }

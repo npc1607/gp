@@ -78,11 +78,11 @@ gantt
 
 > **阶段目标**：建立整洁规范的代码库，确立统一的类型定义、存储接口与工具契约，保证零循环依赖。
 
-- [ ] **Task 0.1：AI 抽象层规范（`internal/ai`）**
+- [x] **Task 0.1：AI 抽象层规范（`internal/ai`）**
   - 完善 `Message`, `Role`, `ToolCall`, `TokenUsage`, `StreamChunk` 基础模型结构体；
   - 定义 `Provider` 接口（`Name()`, `StreamChat(ctx, req) (<-chan StreamChunk, error)`）；
   - 支持模型思考过程块（Thinking/Reasoning Delta）的捕获解析。
-- [ ] **Task 0.2：工具契约与沙箱上下文（`internal/tools`）**
+- [x] **Task 0.2：工具契约与沙箱上下文（`internal/tools`）**
   - 完善 `ToolContext`：强制绑定 `Cwd`、环境变量映射与事件通道，严禁全局状态；
   - 完善 `Registry`：支持白名单裁剪子集（`ScopedRegistry`）。
 - [x] **Task 0.3：Durable 存储引擎抽象（`internal/core/storage`）**
@@ -100,7 +100,7 @@ gantt
     }
     ```
   - 实现纯内存存储后端 `MemoryStorage`，用于单元测试与纯内存子 Agent。
-- [ ] **Task 0.4：配置管理（`internal/core/settings`）**
+- [x] **Task 0.4：配置管理（`internal/core/settings`）**
   - 解析 `~/.gp/settings.json` 与当前项目 `.gp/settings.json`，提供带优先级的层叠合并。
 - **阶段验收标准（Gate M0）**：
   - `go test -v ./...` 单元测试通过率 100%；

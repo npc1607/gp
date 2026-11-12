@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"gp/internal/ai"
+	"gp/internal/core/settings"
 )
 
 type mockProvider struct {
@@ -239,5 +240,108 @@ func TestPrintRunner_TC_PR_001_CLIExecutionLocalTools(t *testing.T) {
 	}
 	if !strings.HasSuffix(capturedText, "\n") {
 		t.Errorf("%s(task=%q): got output without newline suffix: %q", fn, task, capturedText)
+	}
+}
+
+func TestPrintRunner_TC_MOD_001_DefaultParamsResolution(t *testing.T) {
+	fn := "Runner.resolveModelName"
+	t.Setenv("GP_MODEL", "")
+	t.Setenv("PI_MODEL", "")
+
+	tmpDir := t.TempDir()
+	cfg := &settings.Settings{
+		Model: "m-custom",
+	}
+	mgr := settings.NewManagerWithPaths(tmpDir, tmpDir)
+
+	runner := NewRunner(RunnerOptions{
+		ModelName:   "",
+		Cwd:         tmpDir,
+		Settings:    cfg,
+		SettingsMgr: mgr,
+	})
+
+	inputs := map[string]interface{}{
+		"opts.ModelName": "",
+		"settings.Model": "m-custom",
+	}
+
+	got := runner.resolveModelName()
+	want := "m-custom"
+	if got != want {
+		t.Fatalf("%s(inputs=%+v): got %q, want %q", fn, inputs, got, want)
+	}
+}
+
+func TestPrintRunner_TC_MOD_002_ToolAllowlistFallback(t *testing.T) {
+	fn := "Runner.resolveRegistry"
+	tmpDir := t.TempDir()
+
+	customSettings := &settings.Settings{
+		DefaultTools: []string{"read", "bash"},
+	}
+
+	runner := NewRunner(RunnerOptions{
+		ToolAllowlist: nil,
+		Settings:      customSettings,
+		Cwd:           tmpDir,
+	})
+
+	inputs := map[string]interface{}{
+		"opts.ToolAllowlist":    nil,
+		"settings.DefaultTools": []string{"read", "bash"},
+	}
+
+	reg, err := runner.resolveRegistry(tmpDir, customSettings)
+	if err != nil {
+		t.Fatalf("%s(inputs=%+v): got error %v, want nil", fn, inputs, err)
+	}
+
+	toolList := reg.List()
+	if got, want := len(toolList), 2; got != want {
+		t.Fatalf("%s(inputs=%+v): registry tool count got %d, want %d (tools: %v)", fn, inputs, got, want, toolList)
+	}
+
+	if _, ok := reg.Get("read"); !ok {
+		t.Fatalf("%s(inputs=%+v): expected 'read' tool to be present", fn, inputs)
+	}
+	if _, ok := reg.Get("bash"); !ok {
+		t.Fatalf("%s(inputs=%+v): expected 'bash' tool to be present", fn, inputs)
+	}
+	if _, ok := reg.Get("write"); ok {
+		t.Fatalf("%s(inputs=%+v): expected 'write' tool to be trimmed, but it is present", fn, inputs)
+	}
+	if _, ok := reg.Get("edit"); ok {
+		t.Fatalf("%s(inputs=%+v): expected 'edit' tool to be trimmed, but it is present", fn, inputs)
+	}
+}
+
+func TestPrintRunner_SettingsIntegration(t *testing.T) {
+	// Clean ambient env
+	t.Setenv("GP_MODEL", "")
+	t.Setenv("PI_MODEL", "")
+
+	mock := &mockProvider{
+		chunks: []ai.StreamChunk{{DeltaText: "settings ok"}},
+	}
+	var outBuf bytes.Buffer
+
+	customSettings := &settings.Settings{
+		Model:        "settings-injected-model",
+		DefaultTools: []string{"read"},
+	}
+
+	runner := NewRunner(RunnerOptions{
+		Writer:   &outBuf,
+		Provider: mock,
+		Settings: customSettings,
+	})
+
+	if err := runner.Run(context.Background(), "test settings integration"); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if mock.lastModel != "settings-injected-model" {
+		t.Fatalf("Expected injected settings model %q, got %q", "settings-injected-model", mock.lastModel)
 	}
 }
