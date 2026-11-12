@@ -3,6 +3,7 @@ package modes
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"gp/internal/ai"
@@ -49,5 +50,26 @@ func TestPrintRunner_RunInterface(t *testing.T) {
 	expected := "hello from modes runner\n"
 	if got, want := buf.String(), expected; got != want {
 		t.Fatalf("%s(prompt=%q): got output %q, want %q", fn, prompt, got, want)
+	}
+}
+
+func TestResumeRunner_NoUnfinished(t *testing.T) {
+	var buf bytes.Buffer
+	mock := &mockProvider{}
+
+	runner := &ResumeRunner{
+		Opts: ResumeRunnerOptions{
+			DBPath:   ":memory:",
+			Writer:   &buf,
+			Provider: mock,
+		},
+	}
+
+	err := runner.Run(context.Background(), "")
+	if err != nil {
+		t.Fatalf("expected nil error on empty unfinished tasks, got %v", err)
+	}
+	if !strings.Contains(buf.String(), "No unfinished tasks") {
+		t.Fatalf("expected 'No unfinished tasks' message, got %q", buf.String())
 	}
 }

@@ -11,6 +11,10 @@ import (
 	"testing"
 
 	"gp/internal/ai"
+	"gp/internal/core/session"
+	"gp/internal/core/storage"
+	"gp/internal/core/storage/sqlite"
+	"gp/internal/core/task"
 	"gp/internal/tools"
 	"gp/internal/tools/builtin"
 )
@@ -423,5 +427,120 @@ func TestAgentLoop_TC_AG_003_ToolError_SelfHealing(t *testing.T) {
 	}
 	if got, want := ag.GetStatus(), StatusSettled; got != want {
 		t.Errorf("%s(userInput=%q): got status %v, want %v", fn, userInput, got, want)
+	}
+}
+
+type checkpointVerifyingTool struct {
+	store            storage.Storage
+	callID           string
+	statusBeforeExec string
+	executed         bool
+}
+
+func (c *checkpointVerifyingTool) Name() string        { return "verify_cp_tool" }
+func (c *checkpointVerifyingTool) Description() string { return "verifies checkpoint before executing" }
+func (c *checkpointVerifyingTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+func (c *checkpointVerifyingTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*tools.ToolResult, error) {
+	c.executed = true
+	// 在工具实际执行前，校验存储中检查点是否已经落盘且为 running 状态
+	cp, err := c.store.GetCheckpoint(fmt.Sprintf("task_tool_%s", c.callID))
+	if err == nil && cp != nil {
+		c.statusBeforeExec = cp.Status
+	}
+	return &tools.ToolResult{Content: "cp verified successfully"}, nil
+}
+
+// TC-TASK-02: 工具执行前检查点原子落盘
+func TestAgentLoop_TC_TASK_02_ToolCheckpointPreSave(t *testing.T) {
+	fn := "AgentLoop.TC_TASK_02"
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "tc_task_02.db")
+
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open(path=%q): got error %v, want nil", dbPath, err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	callID := "call_cp_presave_01"
+	verifyTool := &checkpointVerifyingTool{
+		store:  store,
+		callID: callID,
+	}
+
+	reg := tools.NewRegistry()
+	if err := reg.Register(verifyTool); err != nil {
+		t.Fatalf("reg.Register(): got error %v, want nil", err)
+	}
+
+	mock := &mockProvider{
+		chatHandlers: []func(req *ai.ChatRequest) []ai.StreamChunk{
+			// Turn 0: 模型发起工具调用
+			func(req *ai.ChatRequest) []ai.StreamChunk {
+				idx := 0
+				return []ai.StreamChunk{
+					{
+						ToolCallDelta: &ai.ToolCall{
+							Index: &idx,
+							ID:    callID,
+							Type:  "function",
+							Function: ai.FunctionCall{
+								Name:      "verify_cp_tool",
+								Arguments: json.RawMessage(`{}`),
+							},
+						},
+					},
+				}
+			},
+			// Turn 1: 工具完成后模型收敛
+			func(req *ai.ChatRequest) []ai.StreamChunk {
+				return []ai.StreamChunk{
+					{DeltaText: "Tool checkpoint validation completed."},
+				}
+			},
+		},
+	}
+
+	ag := NewAgent("tc-task-02-agent", "tester", mock, "test-model", reg)
+	ag.SetStorage(store)
+
+	st, err := session.NewSessionTree(ag.ID(), store)
+	if err != nil {
+		t.Fatalf("session.NewSessionTree(): got error %v, want nil", err)
+	}
+	ag.SetSessionTree(st)
+
+	userInput := "触发检查点预落盘校验"
+	ans, err := ag.Prompt(context.Background(), userInput)
+	if err != nil {
+		t.Fatalf("%s(userInput=%q): got unexpected error %v, want nil", fn, userInput, err)
+	}
+
+	// 1. 验证工具被执行
+	if got, want := verifyTool.executed, true; got != want {
+		t.Fatalf("%s: tool.executed got %v, want %v", fn, got, want)
+	}
+
+	// 2. 关键断言: tool.Execute 触发前，checkpoint 状态必先落盘为 running
+	if got, want := verifyTool.statusBeforeExec, string(task.TaskStatusRunning); got != want {
+		t.Fatalf("%s: statusBeforeExec got %q, want %q", fn, got, want)
+	}
+
+	// 3. 验证工具执行完毕后，持久化检查点更新为 completed
+	cpAfter, err := store.GetCheckpoint(fmt.Sprintf("task_tool_%s", callID))
+	if err != nil || cpAfter == nil {
+		t.Fatalf("%s: store.GetCheckpoint(callID=%q) got cp=%v err=%v, want non-nil cp err=nil", fn, callID, cpAfter, err)
+	}
+	if got, want := cpAfter.Status, string(task.TaskStatusCompleted); got != want {
+		t.Fatalf("%s: post-execution checkpoint status got %q, want %q", fn, got, want)
+	}
+
+	// 4. 验证模型最终响应收敛
+	if got, want := ans, "Tool checkpoint validation completed."; got != want {
+		t.Fatalf("%s: ans got %q, want %q", fn, got, want)
 	}
 }

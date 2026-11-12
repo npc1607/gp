@@ -40,6 +40,28 @@ type Tool interface {
 	Execute(ctx *ToolContext, rawArgs json.RawMessage) (*ToolResult, error)
 }
 
+// ReplayMode 工具幂等重放策略
+type ReplayMode string
+
+const (
+	ReplaySafe      ReplayMode = "safe"      // 只读工具 (如 read): 重启后可安全重跑
+	ReplayInterrupt ReplayMode = "interrupt" // 有副作用工具 (如 bash, edit, write): 重启后不重复执行，向模型报告已中断
+)
+
+// ReplayableTool 支持重放策略声明的工具契约接口
+type ReplayableTool interface {
+	Tool
+	ReplayMode() ReplayMode
+}
+
+// GetReplayMode 获取工具的重放策略，未声明的工具默认为安全起见的 ReplayInterrupt
+func GetReplayMode(t Tool) ReplayMode {
+	if rt, ok := t.(ReplayableTool); ok {
+		return rt.ReplayMode()
+	}
+	return ReplayInterrupt
+}
+
 // Registry 线程安全的工具注册中心
 type Registry struct {
 	mu    sync.RWMutex

@@ -85,7 +85,7 @@ gantt
 - [ ] **Task 0.2：工具契约与沙箱上下文（`internal/tools`）**
   - 完善 `ToolContext`：强制绑定 `Cwd`、环境变量映射与事件通道，严禁全局状态；
   - 完善 `Registry`：支持白名单裁剪子集（`ScopedRegistry`）。
-- [ ] **Task 0.3：Durable 存储引擎抽象（`internal/core/storage`）**
+- [x] **Task 0.3：Durable 存储引擎抽象（`internal/core/storage`）**
   - 参考 Pi Durable 设计轻量事务接口：
     ```go
     type Storage interface {
@@ -135,19 +135,19 @@ gantt
 
 > **阶段目标**：全面注入 Pi Durable 核心精髓！支持 SQLite 事务持久化，实现进程中途被杀后重启能**断点续跑（Resume）**与**精确一次（Exactly-Once）提交**。
 
-- [ ] **Task 2.1：SQLite 存储后端实现（`internal/core/storage/sqlite`）**
+- [x] **Task 2.1：SQLite 存储后端实现（`internal/core/storage/sqlite`）**
   - 采用现代纯 Go 驱动（如 `modernc.org/sqlite`，无需安装 CGO gcc）；
   - 创建标准表结构：`entries`（不可变记录流）、`documents`（Typed JSON 状态）、`task_checkpoints`（任务检查点）；
   - 实现单进程 SQLite WAL 模式，确保写并发性能。
-- [ ] **Task 2.2：检查点与任务恢复（Task Checkpoint & Resume Engine）**
+- [x] **Task 2.2：检查点与任务恢复（Task Checkpoint & Resume Engine）**
   - 任务状态机：`generation`（大模型生成）与 `tool_call`（工具执行）每一步执行前落盘 Checkpoint；
   - **幂等性与重放控制（Idempotent Replay）**：
     - 工具声明 `ReplayMode: "safe"`（只读工具如 `read`，重启后自动重新执行）；
     - 工具声明 `ReplayMode: "interrupt"`（有写副作用工具如 `bash`, `edit`，重启后不重复执行，而是向模型报告中断状态，由模型判断下一步）。
-- [ ] **Task 2.3：所有权级联树（Ownership Tree & Cascade Abort）**
+- [x] **Task 2.3：所有权级联树（Ownership Tree & Cascade Abort）**
   - 建立 Task 树形依赖结构；
   - 当收到 Abort 信号（如用户按 Esc 或上下文超时），**从底向上（Bottom-up）级联取消**所有子任务与关联工具。
-- [ ] **Task 2.4：CLI `gp resume` 命令实现**
+- [x] **Task 2.4：CLI `gp resume` 命令实现**
   - 启动时扫描未完成任务，自动从最新 Checkpoint 恢复未竟的推理流水线。
 - **阶段验收标准（Gate M2）**：
   - 在 Agent 正在执行耗时工具调用或模型流式生成时，使用 `kill -9` 强杀 `gp` 进程；

@@ -10,7 +10,11 @@ import (
 	"gp/internal/agent"
 	"gp/internal/ai"
 	"gp/internal/ai/providers/openai"
+	"gp/internal/core/session"
+	"gp/internal/core/storage"
+	"gp/internal/core/storage/sqlite"
 	"gp/internal/tools/builtin"
+	"time"
 )
 
 const defaultModel = "antigravity/gemini-4-argon"
@@ -21,6 +25,8 @@ type RunnerOptions struct {
 	BaseURL       string
 	APIKey        string
 	Cwd           string
+	DBPath        string
+	Storage       storage.Storage
 	ToolAllowlist []string
 	Writer        io.Writer
 	Provider      ai.Provider
@@ -76,6 +82,26 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 
 	ag := agent.NewAgent("cli-print", "assistant", prov, modelName, reg)
 	ag.SetCwd(cwd)
+
+	var store storage.Storage = r.opts.Storage
+	var shouldCloseStore bool
+	if store == nil && r.opts.DBPath != "" {
+		if s, err := sqlite.Open(r.opts.DBPath); err == nil {
+			store = s
+			shouldCloseStore = true
+		}
+	}
+	if store != nil {
+		if shouldCloseStore {
+			defer store.Close()
+		}
+		sessID := fmt.Sprintf("session_%d", time.Now().UnixNano())
+		st, err := session.NewSessionTree(sessID, store)
+		if err == nil {
+			ag.SetSessionTree(st)
+			ag.SetStorage(store)
+		}
+	}
 
 	var wroteAny bool
 	ag.SetStreamHandler(func(chunk ai.StreamChunk) {

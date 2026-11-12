@@ -10,10 +10,17 @@ import (
 	"gp/internal/tools"
 )
 
-var _ tools.Tool = (*EditTool)(nil)
+var (
+	_ tools.Tool           = (*EditTool)(nil)
+	_ tools.ReplayableTool = (*EditTool)(nil)
+)
 
 // EditTool 精确文本替换，带严格唯一性校验
 type EditTool struct{}
+
+func (e *EditTool) ReplayMode() tools.ReplayMode {
+	return tools.ReplayInterrupt
+}
 
 type editArgs struct {
 	Path    string `json:"path"`

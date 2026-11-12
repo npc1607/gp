@@ -14,7 +14,10 @@ import (
 	"gp/internal/tools"
 )
 
-var _ tools.Tool = (*BashTool)(nil)
+var (
+	_ tools.Tool           = (*BashTool)(nil)
+	_ tools.ReplayableTool = (*BashTool)(nil)
+)
 
 const (
 	defaultBashTimeout = 30 * time.Second
@@ -24,6 +27,10 @@ const (
 
 // BashTool 执行 Shell 命令，支持进程组隔离、超时强杀与输出防爆截断
 type BashTool struct{}
+
+func (b *BashTool) ReplayMode() tools.ReplayMode {
+	return tools.ReplayInterrupt
+}
 
 type bashArgs struct {
 	Command string  `json:"command"`

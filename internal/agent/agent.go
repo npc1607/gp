@@ -7,6 +7,8 @@ import (
 
 	"gp/internal/ai"
 	"gp/internal/core/session"
+	"gp/internal/core/storage"
+	"gp/internal/core/task"
 	"gp/internal/tools"
 )
 
@@ -37,6 +39,8 @@ type AgentInstance struct {
 	cwd           string
 	maxTurns      int
 	streamHandler func(chunk ai.StreamChunk)
+	store         storage.Storage
+	taskTree      *task.OwnershipTree
 }
 
 func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *tools.Registry) *AgentInstance {
@@ -54,7 +58,15 @@ func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *
 	return a
 }
 
-func (a *AgentInstance) ID() string                           { return a.id }
+func (a *AgentInstance) ID() string { return a.id }
+func (a *AgentInstance) SessionID() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.sessionTree != nil && a.sessionTree.SessionID() != "" {
+		return a.sessionTree.SessionID()
+	}
+	return a.id
+}
 func (a *AgentInstance) RoleName() string                     { return a.roleName }
 func (a *AgentInstance) ModelName() string                    { return a.modelName }
 func (a *AgentInstance) GetSessionTree() *session.SessionTree { return a.sessionTree }
@@ -105,6 +117,39 @@ func (a *AgentInstance) GetStreamHandler() func(chunk ai.StreamChunk) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.streamHandler
+}
+
+func (a *AgentInstance) SetStorage(s storage.Storage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.store = s
+	if s != nil && a.taskTree == nil {
+		a.taskTree = task.NewOwnershipTree(s)
+	}
+}
+
+func (a *AgentInstance) GetStorage() storage.Storage {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.store
+}
+
+func (a *AgentInstance) SetTaskTree(tree *task.OwnershipTree) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.taskTree = tree
+}
+
+func (a *AgentInstance) GetTaskTree() *task.OwnershipTree {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.taskTree
+}
+
+func (a *AgentInstance) SetSessionTree(st *session.SessionTree) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionTree = st
 }
 
 // Prompt 驱动 Agent 执行一轮任务，依托 ReAct 状态循环推进

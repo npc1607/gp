@@ -10,7 +10,10 @@ import (
 	"gp/internal/tools"
 )
 
-var _ tools.Tool = (*ReadTool)(nil)
+var (
+	_ tools.Tool           = (*ReadTool)(nil)
+	_ tools.ReplayableTool = (*ReadTool)(nil)
+)
 
 const (
 	maxReadLines = 2000
@@ -19,6 +22,10 @@ const (
 
 // ReadTool 读取文件内容，支持分页、行号格式化与防爆截断
 type ReadTool struct{}
+
+func (r *ReadTool) ReplayMode() tools.ReplayMode {
+	return tools.ReplaySafe
+}
 
 type readArgs struct {
 	Path   string `json:"path"`

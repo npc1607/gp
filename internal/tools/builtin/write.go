@@ -10,10 +10,17 @@ import (
 	"gp/internal/tools"
 )
 
-var _ tools.Tool = (*WriteTool)(nil)
+var (
+	_ tools.Tool           = (*WriteTool)(nil)
+	_ tools.ReplayableTool = (*WriteTool)(nil)
+)
 
 // WriteTool 原子写入文件内容，自动创建父级目录
 type WriteTool struct{}
+
+func (w *WriteTool) ReplayMode() tools.ReplayMode {
+	return tools.ReplayInterrupt
+}
 
 type writeArgs struct {
 	Path    string `json:"path"`
