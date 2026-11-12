@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"gp/internal/modes"
+	"gp/internal/modes/print"
 )
 
 var (
 	flagMode    = flag.String("mode", "interactive", "运行模式: interactive, print, json, rpc")
 	flagPrint   = flag.Bool("p", false, "快捷单次输出模式 (等同于 --mode print)")
-	flagModel   = flag.String("model", "", "指定模型标识 (如 anthropic/claude-3-7-sonnet)")
+	flagModel   = flag.String("model", "", "指定模型标识 (如 antigravity/gemini-4-argon)")
 	flagTools   = flag.String("tools", "", "工具白名单列表 (逗号分隔)")
 	flagVersion = flag.Bool("v", false, "查看版本号")
 )
@@ -38,14 +40,31 @@ func main() {
 	}
 
 	remainingArgs := flag.Args()
-	prompt := ""
-	if len(remainingArgs) > 0 {
-		prompt = remainingArgs[0]
-	}
+	prompt := strings.Join(remainingArgs, " ")
 
 	switch activeMode {
 	case modes.ModePrint:
-		runner := &modes.PrintRunner{}
+		if strings.TrimSpace(prompt) == "" {
+			fmt.Fprintln(os.Stderr, "错误: 请提供提示词，如: gp -p \"读取 main.go\"")
+			os.Exit(1)
+		}
+
+		var allowlist []string
+		if *flagTools != "" {
+			for _, t := range strings.Split(*flagTools, ",") {
+				if trimmed := strings.TrimSpace(t); trimmed != "" {
+					allowlist = append(allowlist, trimmed)
+				}
+			}
+		}
+
+		runner := &modes.PrintRunner{
+			Opts: print.RunnerOptions{
+				ModelName:     *flagModel,
+				ToolAllowlist: allowlist,
+			},
+		}
+
 		if err := runner.Run(ctx, prompt); err != nil {
 			fmt.Fprintf(os.Stderr, "运行错误: %v\n", err)
 			os.Exit(1)

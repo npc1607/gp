@@ -4,6 +4,7 @@ docx/
 # 二进制与编译临时产物
 bin/
 dist/
+/gp
 *.exe
 *.exe~
 *.dll

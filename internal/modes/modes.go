@@ -2,7 +2,8 @@ package modes
 
 import (
 	"context"
-	"fmt"
+
+	"gp/internal/modes/print"
 )
 
 // Mode 运行模式类型
@@ -20,10 +21,13 @@ type Runner interface {
 	Run(ctx context.Context, initialPrompt string) error
 }
 
-// PrintRunner Print 模式运行器实现骨架
-type PrintRunner struct{}
+// PrintRunner Print 模式运行器
+type PrintRunner struct {
+	Opts print.RunnerOptions
+}
 
+// Run 执行 Print 模式任务
 func (p *PrintRunner) Run(ctx context.Context, prompt string) error {
-	fmt.Printf("[gp print mode] 处理任务: %s\n", prompt)
-	return nil
+	runner := print.NewRunner(p.Opts)
+	return runner.Run(ctx, prompt)
 }

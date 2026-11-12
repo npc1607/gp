@@ -112,19 +112,19 @@ gantt
 
 > **阶段目标**：实现首个大模型 Provider，打通核心文件与系统命令工具，跑通第一条完整的单 Agent 编码问答闭环。
 
-- [ ] **Task 1.1：首个大模型驱动实现（`internal/ai/providers/openai`）**
+- [x] **Task 1.1：首个大模型驱动实现（`internal/ai/providers/openai`）**
   - 基于标准 HTTP Client 实现兼容 OpenAI / DeepSeek / Moonshot 的流式 SSE 解析器；
   - 健全的 HTTP 超时控制与 `context.Context` 取消监听。
-- [ ] **Task 1.2：内置核心 Coding 工具集（`internal/tools/builtin`）**
+- [x] **Task 1.2：内置核心 Coding 工具集（`internal/tools/builtin`）**
   - `read`：支持 `offset`/`limit` 分页，带行号格式化，防爆流式截断（50KB / 2000行）；
   - `write`：原子写入（临时文件写入后 `os.Rename`）；
   - `edit`：精确字符串匹配替换，严格唯一性校验（防止误修改同名代码块）；
   - `bash`：基于 `exec.CommandContext` 执行命令，支持实时输出截获与超时强杀。
-- [ ] **Task 1.3：Agent 主循环引擎（`internal/agent/loop.go`）**
+- [x] **Task 1.3：Agent 主循环引擎（`internal/agent/loop.go`）**
   - 实现经典的 ReAct 状态循环：
     `UserPrompt` $\rightarrow$ `Model Stream` $\rightarrow$ `ToolCall Request` $\rightarrow$ `Execute Tool` $\rightarrow$ `Append ToolResult` $\rightarrow$ `Model Stream` $\rightarrow$ `Finish`；
   - 遇到纯文本输出时收敛退出。
-- [ ] **Task 1.4：Print 运行模式对接（`internal/modes/print`）**
+- [x] **Task 1.4：Print 运行模式对接（`internal/modes/print`）**
   - 完善 `gp -p "提示词"` 命令行管道直出逻辑。
 - **阶段验收标准（Gate M1）**：
   - 运行 `gp -p "请用 read 工具读取 main.go 并做简要说明"`，程序自动调用 `read` 工具，成功将结果回填大模型并输出最终解释。

@@ -19,12 +19,12 @@ const (
 
 // SessionEntry 会话分支树节点
 type SessionEntry struct {
-	ID        string          `json:"id"`
-	ParentID  string          `json:"parent_id"` // 指向父节点，构建有向无环分支树
-	Timestamp time.Time       `json:"timestamp"`
-	Type      EntryType       `json:"type"`
-	Message   *ai.Message     `json:"message,omitempty"`
-	Summary   string          `json:"summary,omitempty"` // 针对压缩条目
+	ID        string      `json:"id"`
+	ParentID  string      `json:"parent_id"` // 指向父节点，构建有向无环分支树
+	Timestamp time.Time   `json:"timestamp"`
+	Type      EntryType   `json:"type"`
+	Message   *ai.Message `json:"message,omitempty"`
+	Summary   string      `json:"summary,omitempty"` // 针对压缩条目
 }
 
 // SessionTree 会话分支树与线性投影管理器 (对齐 Pi 的 SessionManager)
