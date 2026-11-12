@@ -26,7 +26,7 @@ var (
 	flagVersion = flag.Bool("v", false, "查看版本号")
 )
 
-const Version = "v0.1.0-alpha"
+var Version = "v0.1.0-alpha"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

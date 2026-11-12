@@ -10,10 +10,13 @@ import (
 	"gp/internal/agent"
 	"gp/internal/ai"
 	"gp/internal/ai/providers/openai"
+	"gp/internal/core/resources"
 	"gp/internal/core/session"
 	"gp/internal/core/settings"
 	"gp/internal/core/storage"
 	"gp/internal/core/storage/sqlite"
+	"gp/internal/extensions/js"
+	"gp/internal/mcp"
 	"gp/internal/tools"
 	"gp/internal/tools/builtin"
 	"time"
@@ -86,6 +89,13 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 	ag := agent.NewAgent("cli-print", "assistant", prov, modelName, reg)
 	ag.SetCwd(cwd)
 
+	homeDir, _ := os.UserHomeDir()
+	resLoader := resources.NewResourceLoader(cwd, homeDir)
+	sysPrompt := resLoader.BuildSystemPrompt(cfg.SystemPrompt)
+	if sysPrompt != "" {
+		ag.SetSystemPrompt(sysPrompt)
+	}
+
 	var store storage.Storage = r.opts.Storage
 	var shouldCloseStore bool
 	if store == nil && r.opts.DBPath != "" {
@@ -134,6 +144,11 @@ func (r *Runner) resolveRegistry(cwd string, cfg *settings.Settings) (*tools.Reg
 	if err != nil {
 		return nil, fmt.Errorf("initialize builtin tools: %w", err)
 	}
+
+	homeDir, _ := os.UserHomeDir()
+	_, _ = mcp.AutoConnectAndRegister(context.Background(), cwd, homeDir, reg)
+	_, _ = js.LoadExtensions(cwd, homeDir, reg)
+
 	allowlist := r.opts.ToolAllowlist
 	if len(allowlist) == 0 && cfg != nil && len(cfg.DefaultTools) > 0 {
 		allowlist = cfg.DefaultTools

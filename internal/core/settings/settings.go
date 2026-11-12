@@ -26,6 +26,7 @@ type Settings struct {
 	DefaultTools   []string `json:"default_tools,omitempty"`
 	MaxConcurrency int      `json:"max_concurrency,omitempty"`
 	TokensPerMin   int      `json:"tokens_per_min,omitempty"`
+	SystemPrompt   string   `json:"system_prompt,omitempty"`
 }
 
 // rawSettings 用于辅助 JSON 反序列化时区分 omitted 与 empty，防止未声明字段覆盖前序层叠值
@@ -37,6 +38,7 @@ type rawSettings struct {
 	DefaultTools   *[]string `json:"default_tools"`
 	MaxConcurrency *int      `json:"max_concurrency"`
 	TokensPerMin   *int      `json:"tokens_per_min"`
+	SystemPrompt   *string   `json:"system_prompt"`
 }
 
 // DefaultSettings 返回包含标准缺省值的配置对象
@@ -169,6 +171,9 @@ func (m *Manager) loadFromFile(path string, target *Settings) error {
 	if raw.TokensPerMin != nil {
 		target.TokensPerMin = *raw.TokensPerMin
 	}
+	if raw.SystemPrompt != nil {
+		target.SystemPrompt = *raw.SystemPrompt
+	}
 	return nil
 }
 
@@ -193,6 +198,10 @@ func (m *Manager) applyEnvOverrides(target *Settings) {
 
 	if val := os.Getenv("GP_THINKING_LEVEL"); val != "" {
 		target.ThinkingLevel = val
+	}
+
+	if val := os.Getenv("GP_SYSTEM_PROMPT"); val != "" {
+		target.SystemPrompt = val
 	}
 
 	if val := os.Getenv("GP_MAX_CONCURRENCY"); val != "" {

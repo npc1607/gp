@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gp/internal/ai"
 	"gp/internal/core/session"
@@ -542,5 +543,139 @@ func TestAgentLoop_TC_TASK_02_ToolCheckpointPreSave(t *testing.T) {
 	// 4. 验证模型最终响应收敛
 	if got, want := ans, "Tool checkpoint validation completed."; got != want {
 		t.Fatalf("%s: ans got %q, want %q", fn, got, want)
+	}
+}
+
+func TestAgentLoop_TC_AGT_001_DynamicSystemPromptInjection(t *testing.T) {
+	fn := "AgentInstance.Prompt"
+	var receivedChatReq *ai.ChatRequest
+	var mu sync.Mutex
+
+	mock := &mockProvider{
+		chatHandlers: []func(req *ai.ChatRequest) []ai.StreamChunk{
+			func(req *ai.ChatRequest) []ai.StreamChunk {
+				mu.Lock()
+				msgs := make([]ai.Message, len(req.Messages))
+				copy(msgs, req.Messages)
+				receivedChatReq = &ai.ChatRequest{
+					Model:    req.Model,
+					Messages: msgs,
+				}
+				mu.Unlock()
+				return []ai.StreamChunk{
+					{DeltaText: "Task completed successfully."},
+				}
+			},
+		},
+	}
+
+	reg := tools.NewRegistry()
+	ag := NewAgent("agent-test", "coder", mock, "mock-model", reg)
+	ag.SetSystemPrompt("SysRule")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	userInput := "task1"
+	ans, err := ag.Prompt(ctx, userInput)
+	if err != nil {
+		t.Fatalf("%s(userInput=%q): got error %v, want nil", fn, userInput, err)
+	}
+	if got, want := ans, "Task completed successfully."; got != want {
+		t.Fatalf("%s(userInput=%q): got answer %q, want %q", fn, userInput, got, want)
+	}
+
+	// 1. 验证下发至 AI Provider 的请求首位被动态注入 RoleSystem
+	mu.Lock()
+	reqMsgs := receivedChatReq.Messages
+	mu.Unlock()
+
+	if len(reqMsgs) < 2 {
+		t.Fatalf("%s(userInput=%q): got %d messages sent to model, want at least 2 (system + user)", fn, userInput, len(reqMsgs))
+	}
+	if got, want := reqMsgs[0].Role, ai.RoleSystem; got != want {
+		t.Fatalf("%s(userInput=%q): got reqMsgs[0].Role %v, want %v", fn, userInput, got, want)
+	}
+	if got, want := reqMsgs[0].Content, "SysRule"; got != want {
+		t.Fatalf("%s(userInput=%q): got reqMsgs[0].Content %q, want %q", fn, userInput, got, want)
+	}
+	if got, want := reqMsgs[1].Role, ai.RoleUser; got != want {
+		t.Fatalf("%s(userInput=%q): got reqMsgs[1].Role %v, want %v", fn, userInput, got, want)
+	}
+	if got, want := reqMsgs[1].Content, "task1"; got != want {
+		t.Fatalf("%s(userInput=%q): got reqMsgs[1].Content %q, want %q", fn, userInput, got, want)
+	}
+
+	// 2. 关键断言: 持久化树节点不被污染，linearContext 中不包含被注入的 RoleSystem
+	linear := ag.GetSessionTree().GetLinearContext()
+	for _, m := range linear {
+		if m.Role == ai.RoleSystem {
+			t.Fatalf("%s(userInput=%q): sessionTree linearContext contains RoleSystem %q; persistent tree should not be mutated", fn, userInput, m.Content)
+		}
+	}
+	if len(linear) == 0 || linear[0].Role != ai.RoleUser {
+		t.Fatalf("%s(userInput=%q): persistent linearContext first message role got %v, want %v", fn, userInput, linear[0].Role, ai.RoleUser)
+	}
+}
+
+func TestAgentLoop_TC_AGT_002_SystemPromptDeduplication(t *testing.T) {
+	fn := "AgentInstance.Prompt"
+	var receivedChatReq *ai.ChatRequest
+	var mu sync.Mutex
+
+	mock := &mockProvider{
+		chatHandlers: []func(req *ai.ChatRequest) []ai.StreamChunk{
+			func(req *ai.ChatRequest) []ai.StreamChunk {
+				mu.Lock()
+				msgs := make([]ai.Message, len(req.Messages))
+				copy(msgs, req.Messages)
+				receivedChatReq = &ai.ChatRequest{
+					Model:    req.Model,
+					Messages: msgs,
+				}
+				mu.Unlock()
+				return []ai.StreamChunk{
+					{DeltaText: "Acknowledged existing rule."},
+				}
+			},
+		},
+	}
+
+	reg := tools.NewRegistry()
+	ag := NewAgent("agent-test-2", "coder", mock, "mock-model", reg)
+
+	// 上下文中预先存在一条 RoleSystem 消息
+	existingSysMsg := ai.NewSystemMessage("PreExistingSystemRule")
+	ag.GetSessionTree().AppendMessage(existingSysMsg)
+
+	// 同时配置 dynamic system prompt
+	ag.SetSystemPrompt("AnotherDynamicSystemRule")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	userInput := "task2"
+	_, err := ag.Prompt(ctx, userInput)
+	if err != nil {
+		t.Fatalf("%s(userInput=%q): got error %v, want nil", fn, userInput, err)
+	}
+
+	// 验证 req.Messages 中 RoleSystem 消息数量严格保持为 1，杜绝重复堆叠
+	mu.Lock()
+	reqMsgs := receivedChatReq.Messages
+	mu.Unlock()
+
+	sysCount := 0
+	for _, m := range reqMsgs {
+		if m.Role == ai.RoleSystem {
+			sysCount++
+		}
+	}
+
+	if got, want := sysCount, 1; got != want {
+		t.Fatalf("%s(userInput=%q): got %d system messages in req.Messages, want exactly %d", fn, userInput, got, want)
+	}
+	if got, want := reqMsgs[0].Content, "PreExistingSystemRule"; got != want {
+		t.Fatalf("%s(userInput=%q): got system message %q, want %q", fn, userInput, got, want)
 	}
 }

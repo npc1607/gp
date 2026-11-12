@@ -123,6 +123,18 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		}
 
 		messages := a.sessionTree.GetLinearContext()
+		if sp := a.GetSystemPrompt(); sp != "" {
+			hasSys := false
+			for _, m := range messages {
+				if m.Role == ai.RoleSystem {
+					hasSys = true
+					break
+				}
+			}
+			if !hasSys {
+				messages = append([]ai.Message{ai.NewSystemMessage(sp)}, messages...)
+			}
+		}
 		a.SetStatus(StatusStreaming)
 
 		req := &ai.ChatRequest{

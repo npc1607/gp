@@ -200,16 +200,16 @@ gantt
 
 > **阶段目标**：打通外部生态，接入 MCP 协议客户端、嵌入式 JS 动态脚本引擎与 Skills 知识库。
 
-- [ ] **Task 5.1：Model Context Protocol 客户端（`internal/mcp`）**
+- [x] **Task 5.1：Model Context Protocol 客户端（`internal/mcp`）**
   - 支持基于 `stdio` 启动外部 MCP 服务子进程（如 gopls-lsp, git-mcp 等）；
   - 自动抓取其 `tools/list` 并动态转译注册为 `gp` 内部的 `Tool`。
-- [ ] **Task 5.2：嵌入式 JavaScript 脚本扩展（`internal/extensions/js`）**
+- [x] **Task 5.2：嵌入式 JavaScript 脚本扩展（`internal/extensions/js`）**
   - 集成纯 Go 实现的 `dop251/goja` 脚本引擎；
   - 暴露 `gp.registerTool(...)` 等 API 给 JS，支持用户在不重新编译 Go 的情况下热加载 `.js` 扩展脚本。
-- [ ] **Task 5.3：Skills 与上下文文件加载（`internal/core/resources`）**
+- [x] **Task 5.3：Skills 与上下文文件加载（`internal/core/resources`）**
   - 扫描解析项目与全局目录下的 `SKILL.md`，按需注入系统提示词；
   - 解析 `AGENTS.md` / `CLAUDE.md` 注入工程守则。
-- [ ] **Task 5.4：跨平台编译与打包发布**
+- [x] **Task 5.4：跨平台编译与打包发布**
   - 编写 `Makefile` 与 GitHub Actions，支持静态交叉编译（`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `windows-amd64`）。
 - **阶段验收标准（Gate M5）**：
   - 能够成功加载现有的 MCP 服务并调用其工具；

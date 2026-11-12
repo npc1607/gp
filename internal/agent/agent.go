@@ -41,6 +41,7 @@ type AgentInstance struct {
 	streamHandler func(chunk ai.StreamChunk)
 	store         storage.Storage
 	taskTree      *task.OwnershipTree
+	systemPrompt  string
 }
 
 func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *tools.Registry) *AgentInstance {
@@ -144,6 +145,18 @@ func (a *AgentInstance) GetTaskTree() *task.OwnershipTree {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.taskTree
+}
+
+func (a *AgentInstance) SetSystemPrompt(p string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.systemPrompt = p
+}
+
+func (a *AgentInstance) GetSystemPrompt() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.systemPrompt
 }
 
 func (a *AgentInstance) SetSessionTree(st *session.SessionTree) {

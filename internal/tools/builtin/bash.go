@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"gp/internal/tools"
@@ -114,13 +113,9 @@ func (b *BashTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*to
 	}
 
 	// Process group isolation & SIGKILL on cancel
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			// Kill entire process group
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
+		return killProcessGroup(cmd)
 	}
 
 	var outputBuf bytes.Buffer

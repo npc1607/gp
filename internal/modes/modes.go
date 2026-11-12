@@ -11,6 +11,8 @@ import (
 	"gp/internal/ai"
 	"gp/internal/ai/providers/openai"
 	"gp/internal/core/storage/sqlite"
+	"gp/internal/extensions/js"
+	"gp/internal/mcp"
 	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
 	"gp/internal/tools/builtin"
@@ -120,6 +122,17 @@ func (r *ResumeRunner) Run(ctx context.Context, _ string) error {
 	if err != nil {
 		return fmt.Errorf("initialize builtin tools: %w", err)
 	}
+
+	cwd, _ := os.Getwd()
+	homeDir, _ := os.UserHomeDir()
+	activeClients, _ := mcp.AutoConnectAndRegister(ctx, cwd, homeDir, reg)
+	defer func() {
+		for _, c := range activeClients {
+			_ = c.Close()
+		}
+	}()
+	_, _ = js.LoadExtensions(cwd, homeDir, reg)
+
 	if len(r.Opts.ToolAllowlist) > 0 {
 		reg = reg.ScopedRegistry(r.Opts.ToolAllowlist)
 	}
