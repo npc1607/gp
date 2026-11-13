@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>gp 通用 TUI 架构设计与插件扩展协议图解 (完全对齐 Pi 原生规范)</title>
+<style>
+  :root {
+    --bg-page: #0a0d14;
+    --bg-terminal: #07090e;
+    --bg-panel: #0d111a;
+    --bg-block: #111622;
+    --border: #1e2638;
+    --border-highlight: #334155;
+    --text-main: #e2e8f0;
+    --text-dim: #64748b;
+    --color-blue: #38bdf8;
+    --color-green: #34d399;
+    --color-amber: #fbbf24;
+    --color-rose: #f43f5e;
+    --color-purple: #c084fc;
+    --color-cyan: #22d3ee;
+    --font-mono: "JetBrains Mono", "SF Mono", Menlo, Monaco, Consolas, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg-page);
+    color: var(--text-main);
+    font-family: var(--font-sans);
+    line-height: 1.6;
+    padding: 32px 20px;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  /* 头部标识 */
+  .header-bar {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 18px;
+    margin-bottom: 28px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+  .header-title { font-size: 24px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
+  .header-meta { color: var(--text-dim); font-size: 13px; margin-top: 4px; }
+  .badge-spec {
+    background: rgba(56, 189, 248, 0.1);
+    color: var(--color-blue);
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    font-family: var(--font-mono);
+  }
+
+  h2 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #fff;
+    margin: 36px 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  p { margin-bottom: 12px; color: #94a3b8; font-size: 13.5px; }
+
+  /* 仿真终端窗口 */
+  .terminal-box {
+    background: var(--bg-terminal);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65);
+    overflow: hidden;
+    margin: 20px 0 32px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .terminal-top {
+    background: #0f1420;
+    padding: 9px 14px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .mac-actions { display: flex; gap: 7px; margin-right: 16px; }
+  .mac-btn { width: 11px; height: 11px; border-radius: 50%; }
+  .btn-close { background: #ff5f56; }
+  .btn-min { background: #ffbd2e; }
+  .btn-max { background: #27c93f; }
+  .terminal-label { color: var(--text-dim); font-size: 11px; flex-grow: 1; text-align: center; }
+
+  /* TUI 顶部状态栏 */
+  .tui-status-bar {
+    background: #0c1019;
+    padding: 6px 16px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    border-bottom: 1px solid #161e2e;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* 视口区域 (原生单栏沉浸流，对齐 Pi) */
+  .tui-viewport {
+    padding: 16px;
+    background: #06080d;
+    min-height: 480px;
+    color: #cbd5e1;
+  }
+
+  /* 用户提示行 */
+  .user-prompt-line {
+    color: var(--color-blue);
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+
+  /* Pi 原生折叠工具组 (Collapsible Calls & Thoughts Group) */
+  .collapsible-group {
+    background: #0a0e17;
+    border: 1px solid #1a2233;
+    border-radius: 6px;
+    margin: 10px 0 14px;
+    overflow: hidden;
+  }
+  .collapsible-header {
+    background: #0e1320;
+    padding: 7px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    border-bottom: 1px solid transparent;
+  }
+  .collapsible-header:hover { background: #131a2a; }
+  .collapsible-group.open .collapsible-header {
+    border-bottom: 1px solid #1a2233;
+  }
+  .arrow-indicator {
+    color: var(--color-purple);
+    font-weight: bold;
+    display: inline-block;
+    width: 14px;
+  }
+  .header-summary { font-weight: 600; color: #f8fafc; }
+  .header-item-tag {
+    color: var(--text-dim);
+    font-size: 11.5px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .header-dot { color: #334155; }
+  .header-elapsed { color: #64748b; font-size: 11px; margin-left: auto; }
+
+  /* 展开的列表内容 */
+  .collapsible-body {
+    padding: 8px 12px;
+    background: #07090f;
+  }
+  .collapsible-group.closed .collapsible-body { display: none; }
+
+  /* 每一行的细化渲染 (完全匹配用户截图) */
+  .flow-row {
+    display: flex;
+    align-items: flex-start;
+    padding: 3px 0;
+    line-height: 1.5;
+    font-size: 12px;
+  }
+  .flow-icon {
+    width: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-shrink: 0;
+  }
+  .flow-role {
+    width: 70px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .flow-role-thinking { color: var(--color-amber); font-style: italic; }
+  .flow-role-read { color: var(--color-blue); }
+  .flow-role-write { color: var(--color-cyan); }
+  .flow-role-edit { color: var(--color-green); }
+  .flow-role-bash { color: var(--color-purple); }
+
+  .flow-status-check { color: var(--color-green); margin-right: 8px; font-weight: bold; }
+  .flow-status-cross { color: var(--color-rose); margin-right: 8px; font-weight: bold; }
+  .flow-text { color: #cbd5e1; flex-grow: 1; word-break: break-all; }
+  .flow-thinking-text { color: var(--color-amber); font-style: italic; opacity: 0.9; }
+
+  /* 内嵌代码 Diff 块 */
+  .diff-embed-box {
+    background: #020408;
+    border: 1px solid #161e2e;
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin: 4px 0 2px 92px;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .diff-l-info { color: #64748b; }
+  .diff-l-add { color: #34d399; background: rgba(52, 211, 153, 0.08); }
+  .diff-l-del { color: #f43f5e; background: rgba(244, 63, 94, 0.08); }
+
+  /* 底部输入栏 */
+  .tui-prompt-area {
+    background: #0d121c;
+    border-top: 1px solid #161e2e;
+    padding: 9px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .tui-prompt-sign { color: var(--color-green); font-weight: bold; }
+  .tui-prompt-input { color: #fff; font-family: inherit; font-size: 12.5px; flex-grow: 1; }
+  .tui-foot-notes {
+    background: #07090e;
+    padding: 5px 16px;
+    font-size: 11px;
+    color: #475569;
+    border-top: 1px solid #131926;
+  }
+
+  /* 架构图与表格 */
+  .svg-container {
+    background: #080c14;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin: 18px 0 26px;
+  }
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    background: #0c1018;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .data-table th, .data-table td {
+    padding: 9px 14px;
+    border: 1px solid var(--border);
+    font-size: 12.5px;
+    text-align: left;
+  }
+  .data-table th { background: #121824; color: #fff; font-weight: 600; }
+  .data-table td { color: #cbd5e1; }
+  .code-tag {
+    background: rgba(148, 163, 184, 0.1);
+    color: var(--color-cyan);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="header-bar">
+    <div>
+      <div class="header-title">gp 极简通用 TUI 架构设计与插件扩展协议方案</div>
+      <div class="header-meta">彻底杜绝硬编码角色与假计时 · 原生单栏沉浸会话流 · 可折叠思考与工具调用组件 · 外部插件 UI 注入规范</div>
+    </div>
+    <div class="badge-spec">PI-ALIGN SPEC V2.1</div>
+  </div>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-blue)" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    一、Pi 原生哲学：彻底剔除特化硬编码，回归通用极简
+  </h2>
+  <p>用户明确指出：<code>[1: 主会话 (Orchestrator)] [2: 侦查员 (Scout)] [3: 研发专家 (Implementer)]</code> 是用户自己以前为 Pi 开发的特定工作流插件产物，<strong>并非通用的 Coding Agent Harness 核心应内置的内容</strong>。</p>
+  <p>在本次重构中，<code>gp</code> 核心层严格对齐 Pi 源码架构：</p>
+  <ul style="padding-left: 20px; color: #cbd5e1; font-size: 13.5px; line-height: 1.8;">
+    <li><strong>移除死板的双拼分栏与假计时器</strong>：默认状态采用优雅的<strong>单栏全宽沉浸式会话视口（Chat Viewport）</strong>，绝不无故占用屏幕宽度，绝不出现没有任务却在空转计时的假 DAG 树；</li>
+    <li><strong>零内置特化角色</strong>：Harness 核心只负责模型会话推进与工具执行，任何多 Agent 协作角色（Scout/Planner/Reviewer）均通过外部插件或工作流机制动态定义；</li>
+    <li><strong>严禁低质 Emoji</strong>：全量使用工程级精致 SVG 矢量图形与等宽 Unicode 字符（<code>▸</code>, <code>▾</code>, <code>✓</code>, <code>✗</code>）；</li>
+    <li><strong>核心组件原生落地</strong>：将用户截图中的<strong>可折叠工具调用与思考组（Collapsible Calls & Thoughts）</strong>作为视口的一等公民核心组件。</li>
+  </ul>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-purple)" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    二、TUI 高仿真交互原型 (点击可折叠栏体验展开与收缩)
+  </h2>
+
+  <!-- 终端仿真器 -->
+  <div class="terminal-box">
+    <div class="terminal-top">
+      <div class="mac-actions">
+        <span class="mac-btn btn-close"></span>
+        <span class="mac-btn btn-min"></span>
+        <span class="mac-btn btn-max"></span>
+      </div>
+      <div class="terminal-label">gp — /Users/pcong/Project/gp</div>
+    </div>
+
+    <!-- 极简状态栏 -->
+    <div class="tui-status-bar">
+      <span>
+        <strong style="color:#fff;">gp</strong> v0.1.0-alpha │ 
+        model: <span style="color:var(--color-blue);">deepseek-chat</span> │ 
+        dir: <span style="color:#64748b;">/Users/pcong/Project/gp</span>
+      </span>
+      <span>
+        session: <span style="color:var(--color-purple);">sess_790000</span> │ 
+        tokens: <span style="color:var(--color-green);">260 tok</span> ($0.0004)
+      </span>
+    </div>
+
+    <!-- 沉浸式会话主视口 -->
+    <div class="tui-viewport">
+      <!-- 用户输入 -->
+      <div class="user-prompt-line">
+        [user] 编写一个单文件 H5 Canvas 飞机大战游戏保存到 aircraft_game.html，并为 loop.go 增加工具调用与 Diff 视图透传
+      </div>
+
+      <!-- 像素级复现用户截图：展开状态的可折叠调用组 -->
+      <div class="collapsible-group open" id="group1">
+        <div class="collapsible-header" onclick="toggleFold('group1')">
+          <span class="arrow-indicator">▾</span>
+          <span class="header-summary">7 calls</span>
+          <span class="header-dot">·</span>
+          <span class="header-item-tag">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-blue)" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            read×4
+          </span>
+          <span class="header-item-tag">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-green)" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            edit×1
+          </span>
+          <span class="header-item-tag">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-cyan)" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            write×1
+          </span>
+          <span class="header-dot">·</span>
+          <span class="header-item-tag">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-amber)" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+            3 thoughts
+          </span>
+          <span class="header-elapsed">1.4s</span>
+        </div>
+
+        <div class="collapsible-body">
+          <!-- 思考行 1 -->
+          <div class="flow-row">
+            <div class="flow-icon">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-amber)" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+            </div>
+            <div class="flow-role flow-role-thinking">thinking</div>
+            <div class="flow-text flow-thinking-text">分析需求：需要先读取 loop.go 与 tool.go 结构，再通过 write 工具写入游戏，最后生成代码 diff...</div>
+          </div>
+          <!-- 工具行 1 -->
+          <div class="flow-row">
+            <div class="flow-icon">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-blue)" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <div class="flow-role flow-role-read">read</div>
+            <span class="flow-status-check">✓</span>
+            <div class="flow-text">/Users/pcong/Project/gp/internal/agent/loop.go <span style="color:#64748b;">(lines 270~350)</span></div>
+          </div>
+          <!-- 工具行 2 -->
+          <div class="flow-row">
+            <div class="flow-icon">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-blue)" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <div class="flow-role flow-role-read">read</div>
+            <span class="flow-status-check">✓</span>
+            <div class="flow-text">/Users/pcong/Project/gp/internal/tools/tool.go</div>
+          </div>
+          <!-- 工具行 3: write -->
+          <div class="flow-row">
+            <div class="flow-icon">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-cyan)" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <div class="flow-role flow-role-write">write</div>
+            <span class="flow-status-check">✓</span>
+            <div class="flow-text">/Users/pcong/Project/gp/aircraft_game.html <span style="color:#64748b;">(40,414 B, 1329 lines)</span></div>
+          </div>
+          <!-- 工具行 4: edit (带 Diff 展开) -->
+          <div class="flow-row" style="flex-direction: column;">
+            <div style="display: flex; align-items: center; width: 100%;">
+              <div class="flow-icon">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-green)" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              </div>
+              <div class="flow-role flow-role-edit">edit</div>
+              <span class="flow-status-check">✓</span>
+              <div class="flow-text">/Users/pcong/Project/gp/internal/agent/loop.go</div>
+            </div>
+            <!-- Diff 代码块 -->
+            <div class="diff-embed-box">
+              <div class="diff-l-info">@@ -290,6 +290,9 @@ for _, call := range finalToolCalls {</div>
+              <div class="diff-l-del">-    // 原执行逻辑未通知 UI</div>
+              <div class="diff-l-add">+    toolHandler := a.GetToolHandler()</div>
+              <div class="diff-l-add">+    if toolHandler != nil { toolHandler(call, "", false, false) }</div>
+            </div>
+          </div>
+          <!-- 思考行 2 -->
+          <div class="flow-row">
+            <div class="flow-icon">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-amber)" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+            </div>
+            <div class="flow-role flow-role-thinking">thinking</div>
+            <div class="flow-text flow-thinking-text">游戏文件与 Diff 变更已落地，检查语法正确，准备收敛输出最终说明。</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 折叠态的示例组件 (可点击展开) -->
+      <div class="collapsible-group closed" id="group2">
+        <div class="collapsible-header" onclick="toggleFold('group2')">
+          <span class="arrow-indicator">▸</span>
+          <span class="header-summary">2 calls</span>
+          <span class="header-dot">·</span>
+          <span class="header-item-tag">bash×1</span>
+          <span class="header-item-tag">read×1</span>
+          <span class="header-dot">·</span>
+          <span class="header-item-tag">1 thought</span>
+          <span class="header-elapsed">0.2s</span>
+        </div>
+        <div class="collapsible-body">
+          <div class="flow-row">
+            <div class="flow-icon">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-purple)" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            </div>
+            <div class="flow-role flow-role-bash">bash</div>
+            <span class="flow-status-check">✓</span>
+            <div class="flow-text">go test -v ./...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 模型助手的交付回复 -->
+      <div style="margin-top: 16px; color: #f1f5f9; line-height: 1.7;">
+        已为你完成 H5 Canvas 飞机大战游戏的编写与工具 Diff 透传优化！<br>
+        • 游戏文件: <code>aircraft_game.html</code> (包含 WASD 键盘操作、鼠标跟随、自动连发、扇形散射与爆炸粒子特效)<br>
+        • 代码重构: <code>loop.go</code> 增加工具执行生命周期回调与 Diff 结构生成。
+      </div>
+      <div style="color: #475569; font-size: 11px; margin-top: 6px;">[Settled in 96.9s]</div>
+    </div>
+
+    <!-- 底部输入栏 -->
+    <div class="tui-prompt-area">
+      <span class="tui-prompt-sign">&gt;</span>
+      <span class="tui-prompt-input">/diff</span>
+    </div>
+
+    <!-- 快捷键指南 -->
+    <div class="tui-foot-notes">
+      [Enter: 发送/执行 | Space: 折叠/展开活动工具组 | Tab: 补全指令 | Ctrl+C: 中断退出 | 输入 / 查看斜杠指令菜单]
+    </div>
+  </div>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-green)" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+    三、外部插件 UI 扩展架构与数据流图解 (对齐 Pi ExtensionAPI)
+  </h2>
+  <p>用户要求：<strong>“可以通过外部插件影响 UI，扩展性需要基本上和 Pi 达成一致”</strong>。在 Pi 架构中，核心 Harness 从不固化特定的工作流角色界面，而是通过提供 <strong>渲染插槽 (Render Slots)</strong> 与 <strong>挂件注入口 (Widget Injection)</strong>，让插件完全掌控展现层：</p>
+
+  <div class="svg-container">
+    <svg width="100%" height="260" viewBox="0 0 940 260" style="background:#070a10;">
+      <!-- 外部插件层 -->
+      <rect x="20" y="30" width="230" height="200" rx="6" fill="#0d1424" stroke="var(--color-blue)" stroke-width="1.5"/>
+      <text x="135" y="55" fill="var(--color-blue)" font-size="13" font-weight="bold" text-anchor="middle">外部插件 (Extensions)</text>
+      <text x="135" y="75" fill="#64748b" font-size="11" text-anchor="middle">.gp/extensions/*.js 或 Go 插件</text>
+      
+      <rect x="35" y="90" width="200" height="125" rx="4" fill="#060912" stroke="#1e293b"/>
+      <text x="45" y="112" fill="var(--color-cyan)" font-size="11" font-family="monospace">gp.ui.registerToolRenderer()</text>
+      <text x="45" y="132" fill="var(--color-cyan)" font-size="11" font-family="monospace">gp.ui.registerEntryRenderer()</text>
+      <text x="45" y="152" fill="var(--color-cyan)" font-size="11" font-family="monospace">gp.ui.setStatus()</text>
+      <text x="45" y="172" fill="var(--color-cyan)" font-size="11" font-family="monospace">gp.ui.setWidget()</text>
+      <text x="45" y="192" fill="var(--color-cyan)" font-size="11" font-family="monospace">gp.registerCommand()</text>
+
+      <!-- 箭头 1 -->
+      <path d="M 250 130 L 330 130" stroke="var(--color-blue)" stroke-width="2" marker-end="url(#arrBlue)"/>
+
+      <!-- 核心注册调度中枢 -->
+      <rect x="330" y="30" width="260" height="200" rx="6" fill="#140f28" stroke="var(--color-purple)" stroke-width="1.5"/>
+      <text x="460" y="55" fill="var(--color-purple)" font-size="13" font-weight="bold" text-anchor="middle">UI 扩展注册中心 (UIRegistry)</text>
+      <text x="460" y="75" fill="#64748b" font-size="11" text-anchor="middle">Harness 核心插槽管理</text>
+
+      <rect x="345" y="90" width="230" height="125" rx="4" fill="#090614" stroke="#2e1f4d"/>
+      <text x="355" y="115" fill="#e2e8f0" font-size="11">• ToolRenderers[name] (按工具定制)</text>
+      <text x="355" y="140" fill="#e2e8f0" font-size="11">• CustomEntryRenderers (自定义条目)</text>
+      <text x="355" y="165" fill="#e2e8f0" font-size="11">• StatusTrayItems (多任务泳道项)</text>
+      <text x="355" y="190" fill="#e2e8f0" font-size="11">• SlashCommands[/cmd] (斜杠指令表)</text>
+
+      <!-- 箭头 2 -->
+      <path d="M 590 130 L 670 130" stroke="var(--color-purple)" stroke-width="2" marker-end="url(#arrPurple)"/>
+
+      <!-- 终端 Bubbletea 渲染引擎 -->
+      <rect x="670" y="30" width="250" height="200" rx="6" fill="#09181a" stroke="var(--color-green)" stroke-width="1.5"/>
+      <text x="795" y="55" fill="var(--color-green)" font-size="13" font-weight="bold" text-anchor="middle">终端渲染合成 (Bubbletea View)</text>
+      <text x="795" y="75" fill="#64748b" font-size="11" text-anchor="middle">单向流差量合并输出</text>
+
+      <rect x="685" y="90" width="220" height="125" rx="4" fill="#040e10" stroke="#133328"/>
+      <text x="695" y="115" fill="#a7f3d0" font-size="11">1. 折叠组自动聚合多轮调用</text>
+      <text x="695" y="140" fill="#a7f3d0" font-size="11">2. 优先调用插件 renderCall()</text>
+      <text x="695" y="165" fill="#a7f3d0" font-size="11">3. 缺省回退至 Harness 默认渲染</text>
+      <text x="695" y="190" fill="#a7f3d0" font-size="11">4. 30 FPS 批量双缓冲零闪烁</text>
+
+      <defs>
+        <marker id="arrBlue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--color-blue)"/>
+        </marker>
+        <marker id="arrPurple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--color-purple)"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h3>1. 外部 JS 插件调用示范 (严丝合缝对齐 Pi `ExtensionAPI`)</h3>
+  <div style="background:#090d16; border:1px solid var(--border); border-radius:6px; padding:14px; font-family:var(--font-mono); font-size:12px; margin-bottom:20px;">
+<pre style="color:#cbd5e1;"><span style="color:#64748b;">// 用户自己开发的插件: .gp/extensions/my_workflow.js</span>
+<span style="color:#a855f7;">gp</span>.<span style="color:#4f8ff7;">ui</span>.<span style="color:#34d399;">registerToolRenderer</span>(<span style="color:#38bdf8;">"read"</span>, {
+  <span style="color:#4f8ff7;">renderCall</span>: <span style="color:#a855f7;">function</span>(args) {
+    <span style="color:#a855f7;">return</span> <span style="color:#38bdf8;">"read "</span> + args.path + (args.offset ? <span style="color:#38bdf8;">":"</span> + args.offset : <span style="color:#38bdf8;">""</span>);
+  },
+  <span style="color:#4f8ff7;">renderResult</span>: <span style="color:#a855f7;">function</span>(res) {
+    <span style="color:#a855f7;">return</span> res.isError ? <span style="color:#f43f5e;">"✗"</span> : <span style="color:#34d399;">"✓"</span>;
+  }
+});
+
+<span style="color:#64748b;">// 如果是工作流插件，通过 setStatus 动态在泳道展示，而不是 Harness 写死！</span>
+<span style="color:#a855f7;">gp</span>.<span style="color:#4f8ff7;">ui</span>.<span style="color:#34d399;">setStatus</span>(<span style="color:#38bdf8;">"workflow_step"</span>, <span style="color:#38bdf8;">"Scout: 正在扫描核心符号表..."</span>);
+</pre>
+  </div>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-amber)" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+    四、常用 Agent 斜杠指令集 (Slash Commands) 契约表
+  </h2>
+
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th style="width: 16%;">指令</th>
+        <th style="width: 18%;">参数</th>
+        <th style="width: 46%;">行为说明</th>
+        <th style="width: 20%;">快捷别名</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="code-tag">/help</span></td>
+        <td>无</td>
+        <td>在当前会话视口打印完整的指令集、说明及快捷键指南</td>
+        <td><code>/?</code></td>
+      </tr>
+      <tr>
+        <td><span class="code-tag">/diff</span></td>
+        <td><code>[filepath]</code></td>
+        <td>调用本地 Git 生成当前代码变更对比，以标准绿红高亮 Diff 呈现</td>
+        <td><code>/d</code></td>
+      </tr>
+      <tr>
+        <td><span class="code-tag">/clear</span></td>
+        <td>无</td>
+        <td>清空视口与会话内存上下文，开启全新的干净对话</td>
+        <td><code>/new</code>, <code>/reset</code></td>
+      </tr>
+      <tr>
+        <td><span class="code-tag">/model</span></td>
+        <td><code>[name]</code></td>
+        <td>查看当前模型；提供参数时就地无缝热切换生效模型</td>
+        <td><code>/m</code></td>
+      </tr>
+      <tr>
+        <td><span class="code-tag">/tokens</span></td>
+        <td>无</td>
+        <td>打印当前会话的精确 Token 消耗明细与资费统计</td>
+        <td><code>/usage</code></td>
+      </tr>
+      <tr>
+        <td><span class="code-tag">/tools</span></td>
+        <td>无</td>
+        <td>列出当前启用的所有内置工具、MCP 远端工具与 JS 扩展工具</td>
+        <td>无</td>
+      </tr>
+      <tr>
+        <td><span class="code-tag">/compact</span></td>
+        <td><code>[focus]</code></td>
+        <td>手动触发上下文滑动窗口压缩，折叠早期历史</td>
+        <td>无</td>
+      </tr>
+      <tr>
+        <td><span class="code-tag">/exit</span></td>
+        <td>无</td>
+        <td>安全释放数据库连接与后台子协程，优雅退出 TUI 界面</td>
+        <td><code>/quit</code>, <code>/q</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-cyan)" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+    五、核心落地推进步骤
+  </h2>
+  <ol style="padding-left: 20px; line-height: 2; color: #cbd5e1; font-size: 13px;">
+    <li><strong>第一步：移除硬编码角色与空跑 DAG 树</strong>：重构 <code>internal/tui/model.go</code>，消除写死的 <code>[Scout] [Implementer]</code> 选项卡与强制 35% 分栏，默认采用单栏沉浸视口。</li>
+    <li><strong>第二步：实现 CollapsibleCalls 聚合折叠容器组件</strong>：在 <code>internal/tui/buffer.go</code> 增加多轮工具调用与思考组折叠状态机，默认折叠为单行摘要（<code>▸ 7 calls · ...</code>），按 Space 键或回车展开详情。</li>
+    <li><strong>第三步：打通代码 Diff 生成与工具调用卡片</strong>：在 <code>internal/agent/loop.go</code> 对接 <code>ToolHandler</code>，实时将 <code>edit</code> 的真实变更 Diff 和 <code>write</code> 目标路径优雅注入渲染。</li>
+    <li><strong>第四步：实现 Slash Commands 分发器 (<code>internal/commands</code>)</strong>：在输入栏拦截以 <code>/</code> 开头的指令并在本地瞬间执行响应。</li>
+    <li><strong>第五步：开放外部插件 UI 渲染器注册接口 (<code>UIRegistry</code>)</strong>：在 Goja JS 引擎中暴露 <code>gp.ui.registerToolRenderer</code>，全面兼容 Pi 扩展语法。</li>
+  </ol>
+
+</div>
+
+<script>
+  // 交互式折叠/展开演示逻辑
+  function toggleFold(groupId) {
+    var el = document.getElementById(groupId);
+    var arrow = el.querySelector('.arrow-indicator');
+    if (el.classList.contains('open')) {
+      el.classList.remove('open');
+      el.classList.add('closed');
+      arrow.textContent = '▸';
+    } else {
+      el.classList.remove('closed');
+      el.classList.add('open');
+      arrow.textContent = '▾';
+    }
+  }
+</script>
+
+</body>
+</html>
