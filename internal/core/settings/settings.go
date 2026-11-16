@@ -48,7 +48,7 @@ func DefaultSettings() Settings {
 		BaseURL:        DefaultBaseURL,
 		APIKey:         "",
 		ThinkingLevel:  DefaultThinkingLevel,
-		DefaultTools:   []string{"read", "write", "edit", "bash"},
+		DefaultTools:   []string{"read", "write", "edit", "bash", "subagent"},
 		MaxConcurrency: DefaultMaxConcurrency,
 		TokensPerMin:   DefaultTokensPerMin,
 	}

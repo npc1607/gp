@@ -59,7 +59,7 @@ func TestSettings_TC_SET_001_DefaultSettings(t *testing.T) {
 		t.Fatalf("%s(): TokensPerMin got %d, want %d", fn, got, want)
 	}
 
-	wantTools := []string{"read", "write", "edit", "bash"}
+	wantTools := []string{"read", "write", "edit", "bash", "subagent"}
 	if got := s.DefaultTools; !reflect.DeepEqual(got, wantTools) {
 		t.Fatalf("%s(): DefaultTools got %v, want %v", fn, got, wantTools)
 	}
@@ -85,7 +85,7 @@ func TestSettings_TC_SET_002_CloneIsolation(t *testing.T) {
 	if got, want := orig.DefaultTools[0], "read"; got != want {
 		t.Fatalf("%s(): mutating cloned slice affected original[0]: got %q, want %q", fn, got, want)
 	}
-	if got, want := len(orig.DefaultTools), 4; got != want {
+	if got, want := len(orig.DefaultTools), 5; got != want {
 		t.Fatalf("%s(): mutating cloned slice affected original len: got %d, want %d", fn, got, want)
 	}
 }
