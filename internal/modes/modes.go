@@ -137,6 +137,11 @@ func (r *ResumeRunner) Run(ctx context.Context, _ string) error {
 		reg = reg.ScopedRegistry(r.Opts.ToolAllowlist)
 	}
 
+	// 接线真实子 Agent 执行器，避免 subagent 工具退化为空回执 stub
+	if err := builtin.WireSubagentRunner(reg, prov, modelName, cwd); err != nil {
+		_ = err
+	}
+
 	var wroteAny bool
 	streamHandler := func(chunk ai.StreamChunk) {
 		if chunk.DeltaText != "" {

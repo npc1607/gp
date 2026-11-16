@@ -86,6 +86,11 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 		return fmt.Errorf("resolve registry: %w", err)
 	}
 
+	// 接线真实子 Agent 执行器，避免 subagent 工具退化为空回执 stub
+	if err := builtin.WireSubagentRunner(reg, prov, modelName, cwd); err != nil {
+		_ = err // 子 Agent 不可用时降级为内置 stub，不阻塞主流程
+	}
+
 	ag := agent.NewAgent("cli-print", "assistant", prov, modelName, reg)
 	ag.SetCwd(cwd)
 
