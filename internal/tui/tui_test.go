@@ -299,7 +299,7 @@ func TestTUI_TC_TUI_007_WindowResizeClampProtection(t *testing.T) {
 			name:      "standard_120x40",
 			sizeMsg:   tea.WindowSizeMsg{Width: 120, Height: 40},
 			wantLeftW: 42,
-			wantBodyH: 30,
+			wantBodyH: 33, // 40 - 6 (opencode editor) - 1 (starship footer)
 		},
 	}
 
@@ -641,3 +641,101 @@ func TestTUI_UserInput(t *testing.T)                { TestTUI_TC_TUI_008_UserInp
 func TestTUI_ScrollAndKeys(t *testing.T)            { TestTUI_TC_TUI_010_ViewportIndependentScroll(t) }
 func TestTUI_ZeroBufferSafety(t *testing.T)         { TestTUI_TC_TUI_004_SingleOrEmptyTabBoundary(t) }
 func TestTUI_DAGTreeStatusBadges(t *testing.T)      { TestTUI_DAGTree_BadgeRendering_TableDriven(t) }
+
+// ── pi-tidy + pi-zentui 新架构专项测试 ──────────────────────────────────────
+
+func TestTUI_PiTidy_TurnAndToolGroupFolding(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 35})
+
+	_, _ = m.Update(UserSubmitPromptMsg{Prompt: "inspect repo"})
+	_, _ = m.Update(TurnStartMsg{AgentID: "main", Turn: 0})
+	_, _ = m.Update(AgentThinkingDeltaMsg{AgentID: "main", ThinkingDelta: "checking files first"})
+	_, _ = m.Update(ToolCallStartMsg{AgentID: "main", CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"git status"}`})
+	_, _ = m.Update(ToolCallEndMsg{AgentID: "main", CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"git status"}`, Result: "clean\n", Duration: 120 * time.Millisecond})
+	_, _ = m.Update(ToolCallStartMsg{AgentID: "main", CallID: "c2", ToolName: "read", ArgsRaw: `{"path":"go.mod"}`})
+	_, _ = m.Update(ToolCallEndMsg{AgentID: "main", CallID: "c2", ToolName: "read", ArgsRaw: `{"path":"go.mod"}`, Result: "module gp\n", Duration: 50 * time.Millisecond})
+	_, _ = m.Update(AgentStreamDeltaMsg{AgentID: "main", DeltaText: "All clean with `go.mod` and #89b4fa."})
+	_, _ = m.Update(TurnEndMsg{AgentID: "main", Turn: 0, Outcome: "completed"})
+
+	view := m.View()
+	// 1. User message framed
+	if !strings.Contains(view, "inspect repo") {
+		t.Fatalf("expected user prompt in view, got:\n%s", view)
+	}
+	// 2. Settled turn folded into summary line
+	if !strings.Contains(view, "▸ took") || !strings.Contains(view, "2 calls") {
+		t.Fatalf("expected folded turn summary line (▸ took ... 2 calls), got:\n%s", view)
+	}
+	// 3. Final reply framed with rounded corners & model name
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "gemini-4-argon") || !strings.Contains(view, "╰") {
+		t.Fatalf("expected rounded final reply frame with model name, got:\n%s", view)
+	}
+	// 4. Ctrl+O expands all turns & tool groups
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	expandedView := m.View()
+	if !strings.Contains(expandedView, "▾ took") || !strings.Contains(expandedView, "▾ 2 calls") {
+		t.Fatalf("expected expanded turn & tool group after Ctrl+O, got:\n%s", expandedView)
+	}
+	// 5. Ctrl+T toggles thinking box
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	thinkView := m.View()
+	if !strings.Contains(thinkView, "checking files first") {
+		t.Fatalf("expected thinking content after Ctrl+T, got:\n%s", thinkView)
+	}
+}
+
+func TestTUI_PiTidy_SplitDiffAndRuledCodeBlocks(t *testing.T) {
+	th := DefaultTheme()
+	cfg := DefaultUIConfig()
+
+	// Split diff at wide width
+	split := RenderSplitDiff("line1\noldValue\nline3", "line1\nnewValue\nline3", 90, 20, true, 72, th)
+	joined := strings.Join(split, "\n")
+	if !strings.Contains(joined, "oldValue") || !strings.Contains(joined, "newValue") || !strings.Contains(joined, "│") {
+		t.Fatalf("expected split diff with old/new panes, got:\n%s", joined)
+	}
+
+	// Narrow width falls back to unified diff
+	unified := RenderSplitDiff("oldValue", "newValue", 50, 20, true, 72, th)
+	uJoined := strings.Join(unified, "\n")
+	if !strings.Contains(uJoined, "- ") || !strings.Contains(uJoined, "+ ") {
+		t.Fatalf("expected unified diff fallback at narrow width, got:\n%s", uJoined)
+	}
+
+	// Ruled code blocks + hex swatches
+	md := RenderMarkdownWithCodeBlocks("Color #89b4fa:\n```go\nfmt.Println(1)\n```", 60, th, cfg, th.Accent, true)
+	mdJoined := strings.Join(md, "\n")
+	if !strings.Contains(mdJoined, "● #89b4fa") {
+		t.Fatalf("expected hex swatch ● #89b4fa, got:\n%s", mdJoined)
+	}
+	if !strings.Contains(mdJoined, "go") || !strings.Contains(mdJoined, "fmt.Println(1)") {
+		t.Fatalf("expected ruled code block in markdown output, got:\n%s", mdJoined)
+	}
+}
+
+func TestTUI_PiZentui_EditorWorkingLineAndFooter(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	_, _ = m.Update(TurnStartMsg{AgentID: "main", Turn: 0})
+	_, _ = m.Update(ToolCallStartMsg{AgentID: "main", CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"go test"}`})
+	_, _ = m.Update(TokenUsageMsg{InputTokens: 1200, OutputTokens: 350, TotalTokens: 1550})
+
+	view := m.View()
+	if !strings.Contains(view, "Simmering…") || !strings.Contains(view, "(bash)") {
+		t.Fatalf("expected working line embedded in opencode editor border, got:\n%s", view)
+	}
+	if !strings.Contains(view, "ctx: 1.6k/128.0k") || !strings.Contains(view, "↑1.2k ↓350") {
+		t.Fatalf("expected starship footer metrics, got:\n%s", view)
+	}
+
+	// Test /zentui preset minimalist
+	m.inputArea.SetValue("/zentui preset minimalist")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := m.Config().EditorStyle; got != "minimalist" {
+		t.Fatalf("expected minimalist editor style after /zentui preset, got %q", got)
+	}
+	if got := m.Config().FooterStyle; got != "hidden" {
+		t.Fatalf("expected hidden footer style after /zentui preset minimalist, got %q", got)
+	}
+}

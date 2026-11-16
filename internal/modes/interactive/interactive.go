@@ -85,6 +85,11 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		return fmt.Errorf("resolve registry: %w", err)
 	}
 
+	// 接线真实子 Agent 执行器，避免 subagent 工具退化为空回执 stub
+	if err := builtin.WireSubagentRunner(reg, prov, modelName, cwd); err != nil {
+		_ = err
+	}
+
 	var store storage.Storage = r.opts.Storage
 	var shouldCloseStore bool
 	if store == nil && r.opts.DBPath != "" {
@@ -116,18 +121,83 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		}
 	}
 
+	providerName := ""
+	if prov != nil {
+		providerName = prov.Name()
+	}
+	thinkingLevel := ""
+	if cfg != nil {
+		thinkingLevel = cfg.ThinkingLevel
+	}
 	header := tui.HeaderInfo{
-		AppName:    "gp",
-		Version:    "v0.1.0-alpha",
-		ModelName:  modelName,
-		SessionID:  sessID,
-		TokenUsage: "0 tok",
+		AppName:       "gp",
+		Version:       "v0.1.0-alpha",
+		ModelName:     modelName,
+		ProviderName:  providerName,
+		ThinkingLevel: thinkingLevel,
+		SessionID:     sessID,
+		TokenUsage:    "0 tok",
+		Cwd:           cwd,
 	}
 
 	var p *tea.Program
 
+	ag.SetEventHandler(func(ev agent.AgentEvent) {
+		if p == nil {
+			return
+		}
+		switch ev.Type {
+		case agent.EventTurnStart:
+			p.Send(tui.TurnStartMsg{
+				AgentID: ev.AgentID,
+				Turn:    ev.Turn,
+			})
+		case agent.EventTurnEnd:
+			p.Send(tui.TurnEndMsg{
+				AgentID:  ev.AgentID,
+				Turn:     ev.Turn,
+				Outcome:  ev.Outcome,
+				Duration: ev.Duration,
+			})
+		case agent.EventToolCallStart:
+			p.Send(tui.ToolCallStartMsg{
+				AgentID:  ev.AgentID,
+				CallID:   ev.CallID,
+				ToolName: ev.ToolName,
+				ArgsRaw:  string(ev.Args),
+			})
+		case agent.EventToolCallEnd:
+			p.Send(tui.ToolCallEndMsg{
+				AgentID:  ev.AgentID,
+				CallID:   ev.CallID,
+				ToolName: ev.ToolName,
+				ArgsRaw:  string(ev.Args),
+				Result:   ev.Result,
+				IsError:  ev.IsError,
+				Duration: ev.Duration,
+			})
+		case agent.EventUsage:
+			if ev.Usage != nil {
+				p.Send(tui.TokenUsageMsg{
+					InputTokens:  ev.Usage.InputTokens,
+					OutputTokens: ev.Usage.OutputTokens,
+					TotalTokens:  ev.Usage.TotalTokens,
+				})
+			}
+		}
+	})
+
 	ag.SetStreamHandler(func(chunk ai.StreamChunk) {
-		if p != nil && chunk.DeltaText != "" {
+		if p == nil {
+			return
+		}
+		if chunk.ThinkingDelta != "" {
+			p.Send(tui.AgentThinkingDeltaMsg{
+				AgentID:       "main",
+				ThinkingDelta: chunk.ThinkingDelta,
+			})
+		}
+		if chunk.DeltaText != "" {
 			p.Send(tui.AgentStreamDeltaMsg{
 				AgentID:   "main",
 				DeltaText: chunk.DeltaText,
@@ -139,10 +209,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 	uiModel := tui.NewMainUIModel(header, func(userPrompt string) {
 		if !isRunning.CompareAndSwap(false, true) {
 			if p != nil {
-				p.Send(tui.AgentStreamDeltaMsg{
-					AgentID:   "main",
-					DeltaText: "\n[System]: 当前任务仍在执行中，请稍候再提交...\n",
-				})
+				p.Send(tui.ErrorMsg{Err: fmt.Errorf("当前任务仍在执行中，请稍候再提交")})
 			}
 			return
 		}
@@ -151,27 +218,19 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			if p != nil {
 				p.Send(tui.ActiveCoroutineMsg{
 					AgentID:  "main",
-					Role:     "Orchestrator",
-					TaskDesc: "Thinking...",
-					Elapsed:  0,
+					TaskDesc: "Simmering…",
 					Active:   true,
 				})
 			}
-			start := time.Now()
 			_, promptErr := ag.Prompt(ctx, userPrompt)
-			elapsed := time.Since(start)
 			if p != nil {
 				p.Send(tui.ActiveCoroutineMsg{
 					AgentID: "main",
 					Active:  false,
 				})
 				if promptErr != nil {
+					p.Send(tui.TurnEndMsg{AgentID: "main", Outcome: "error"})
 					p.Send(tui.ErrorMsg{Err: promptErr})
-				} else {
-					p.Send(tui.AgentStreamDeltaMsg{
-						AgentID:   "main",
-						DeltaText: fmt.Sprintf("\n[Completed in %.1fs]\n", elapsed.Seconds()),
-					})
 				}
 			}
 		}()
@@ -186,37 +245,12 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		return nil
 	}
 
-	p = tea.NewProgram(uiModel, tea.WithAltScreen())
+	p = tea.NewProgram(uiModel, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if prompt != "" {
 		go func() {
 			time.Sleep(50 * time.Millisecond)
-			p.Send(tui.AgentStreamDeltaMsg{
-				AgentID:   "main",
-				DeltaText: fmt.Sprintf("[User]: %s\n\n", prompt),
-			})
-			p.Send(tui.ActiveCoroutineMsg{
-				AgentID:  "main",
-				Role:     "Orchestrator",
-				TaskDesc: "Processing prompt...",
-				Elapsed:  0,
-				Active:   true,
-			})
-			start := time.Now()
-			_, err := ag.Prompt(ctx, prompt)
-			elapsed := time.Since(start)
-			p.Send(tui.ActiveCoroutineMsg{
-				AgentID: "main",
-				Active:  false,
-			})
-			if err != nil {
-				p.Send(tui.ErrorMsg{Err: err})
-			} else {
-				p.Send(tui.AgentStreamDeltaMsg{
-					AgentID:   "main",
-					DeltaText: fmt.Sprintf("\n[Completed in %.1fs]\n", elapsed.Seconds()),
-				})
-			}
+			p.Send(tui.UserSubmitPromptMsg{Prompt: prompt})
 		}()
 	}
 

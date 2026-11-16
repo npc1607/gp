@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -81,47 +80,41 @@ func (m *ActiveTrayModel) UpdateSpinner(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// Render 渲染多任务动态悬浮托盘
+// Render 渲染任务进度指示行
 func (m *ActiveTrayModel) Render(width int) string {
 	if width < 1 {
 		width = 1
 	}
 
-	var lines []string
-	lines = append(lines, styleTrayHeader.Render("⚡ 动态任务泳道 (Active Coroutine Tray):"))
-
 	if len(m.order) == 0 {
-		lines = append(lines, styleTrayMuted.Render("  (暂无活跃子协程 / No active background coroutines)"))
-	} else {
-		spView := m.spinner.View()
-		if spView == "" {
-			spView = "⠋"
-		}
-		const maxVisible = 4
-		visibleCount := 0
-		for _, id := range m.order {
-			if visibleCount >= maxVisible {
-				remaining := len(m.order) - maxVisible
-				lines = append(lines, styleTrayMuted.Render(fmt.Sprintf("  ... (另有 %d 个子任务在后台运行)", remaining)))
-				break
-			}
-			item := m.coroutines[id]
-			role := item.Role
-			if role == "" {
-				role = item.AgentID
-			}
-			elapsedStr := fmt.Sprintf("%.1fs", item.Elapsed.Seconds())
-			line := fmt.Sprintf("  %s %s %s %s",
-				spView,
-				styleTrayRole.Render(fmt.Sprintf("[%s]", role)),
-				styleTrayDesc.Render(item.TaskDesc),
-				styleTrayTime.Render(elapsedStr),
-			)
-			lines = append(lines, line)
-			visibleCount++
-		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#262626")).Render("  (No active background coroutines)")
 	}
 
-	content := strings.Join(lines, "\n")
-	return lipgloss.NewStyle().MaxWidth(width).Render(content)
+	id := m.order[0]
+	item := m.coroutines[id]
+
+	desc := item.TaskDesc
+	if desc == "" {
+		desc = "Simmering..."
+	}
+	elapsedStr := fmt.Sprintf("%.1fs", item.Elapsed.Seconds())
+
+	star := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ade80")).Bold(true).Render("*")
+	var line string
+	if item.Role != "" {
+		line = fmt.Sprintf(" %s %s %s · %s",
+			star,
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#38bdf8")).Bold(true).Render(fmt.Sprintf("[%s]", item.Role)),
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#737373")).Render(desc),
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#737373")).Render(elapsedStr),
+		)
+	} else {
+		line = fmt.Sprintf(" %s %s · %s",
+			star,
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#737373")).Render(desc),
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#737373")).Render(elapsedStr),
+		)
+	}
+
+	return lipgloss.NewStyle().MaxWidth(width).Render(line)
 }

@@ -9,10 +9,56 @@ import (
 // TickMsg 30 FPS (33ms) 节流渲染时钟消息
 type TickMsg time.Time
 
-// AgentStreamDeltaMsg 某个 Agent 的流式 Token 差量
+// AgentStreamDeltaMsg 某个 Agent 的流式文本 Token 差量
 type AgentStreamDeltaMsg struct {
 	AgentID   string
 	DeltaText string
+}
+
+// AgentThinkingDeltaMsg 某个 Agent 的流式思考 Token 差量
+type AgentThinkingDeltaMsg struct {
+	AgentID       string
+	ThinkingDelta string
+}
+
+// TurnStartMsg 标记一轮对话执行开始
+type TurnStartMsg struct {
+	AgentID string
+	Turn    int
+}
+
+// TurnEndMsg 标记一轮对话执行结束
+type TurnEndMsg struct {
+	AgentID  string
+	Turn     int
+	Outcome  string // "completed" | "error" | "interrupted"
+	Duration time.Duration
+}
+
+// ToolCallStartMsg 工具调用开始事件
+type ToolCallStartMsg struct {
+	AgentID  string
+	CallID   string
+	ToolName string
+	ArgsRaw  string
+}
+
+// ToolCallEndMsg 工具调用完成事件
+type ToolCallEndMsg struct {
+	AgentID  string
+	CallID   string
+	ToolName string
+	ArgsRaw  string
+	Result   string
+	IsError  bool
+	Duration time.Duration
+}
+
+// TokenUsageMsg Token 消耗更新事件
+type TokenUsageMsg struct {
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
 }
 
 // AgentStatusChangedMsg Agent 状态跃迁通知 (状态机变化、工具调用)
