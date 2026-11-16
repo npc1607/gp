@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"gp/internal/ai"
 	"gp/internal/core/session"
@@ -11,6 +13,33 @@ import (
 	"gp/internal/core/task"
 	"gp/internal/tools"
 )
+
+// EventType 结构化 Agent 生命周期事件类型
+type EventType string
+
+const (
+	EventTurnStart     EventType = "turn_start"
+	EventTurnEnd       EventType = "turn_end"
+	EventToolCallStart EventType = "tool_call_start"
+	EventToolCallEnd   EventType = "tool_call_end"
+	EventUsage         EventType = "usage"
+)
+
+// AgentEvent 结构化 Agent 运行事件，供 TUI / 日志等消费
+type AgentEvent struct {
+	Type       EventType
+	AgentID    string
+	Turn       int
+	CallID     string
+	ToolName   string
+	Args       json.RawMessage
+	Result     string
+	IsError    bool
+	Duration   time.Duration
+	Usage      *ai.TokenUsage
+	Outcome    string
+	Timestamp  time.Time
+}
 
 // Status Agent 生命周期状态机
 type Status string
@@ -39,6 +68,7 @@ type AgentInstance struct {
 	cwd           string
 	maxTurns      int
 	streamHandler func(chunk ai.StreamChunk)
+	eventHandler  func(ev AgentEvent)
 	store         storage.Storage
 	taskTree      *task.OwnershipTree
 	systemPrompt  string
@@ -118,6 +148,27 @@ func (a *AgentInstance) GetStreamHandler() func(chunk ai.StreamChunk) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.streamHandler
+}
+
+func (a *AgentInstance) SetEventHandler(h func(ev AgentEvent)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.eventHandler = h
+}
+
+func (a *AgentInstance) EmitEvent(ev AgentEvent) {
+	a.mu.RLock()
+	h := a.eventHandler
+	a.mu.RUnlock()
+	if h != nil {
+		if ev.AgentID == "" {
+			ev.AgentID = a.id
+		}
+		if ev.Timestamp.IsZero() {
+			ev.Timestamp = time.Now()
+		}
+		h(ev)
+	}
 }
 
 func (a *AgentInstance) SetStorage(s storage.Storage) {

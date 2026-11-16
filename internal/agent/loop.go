@@ -95,8 +95,24 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		maxTurns = 50
 	}
 
+	runStart := time.Now()
+	runOutcome := "error"
+	a.EmitEvent(AgentEvent{
+		Type: EventTurnStart,
+		Turn: 0,
+	})
+	defer func() {
+		a.EmitEvent(AgentEvent{
+			Type:     EventTurnEnd,
+			Turn:     0,
+			Duration: time.Since(runStart),
+			Outcome:  runOutcome,
+		})
+	}()
+
 	for turn := 0; turn < maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
+			runOutcome = "interrupted"
 			a.SetStatus(StatusSettled)
 			if taskTree != nil {
 				abortCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -214,6 +230,14 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 				}
 			}
 
+			if chunk.Usage != nil {
+				a.EmitEvent(AgentEvent{
+					Type:  EventUsage,
+					Turn:  turn,
+					Usage: chunk.Usage,
+				})
+			}
+
 			if streamHandler != nil {
 				streamHandler(chunk)
 			}
@@ -266,6 +290,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 			if taskTree != nil {
 				_ = taskTree.UpdateTask(ctx, sessTaskID, task.TaskStatusCompleted, nil)
 			}
+			runOutcome = "completed"
 			return textDelta.String(), nil
 		}
 
@@ -324,6 +349,14 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 			var resultContent string
 			var hasExecErr bool
+			toolStart := time.Now()
+			a.EmitEvent(AgentEvent{
+				Type:     EventToolCallStart,
+				Turn:     turn,
+				CallID:   call.ID,
+				ToolName: call.Function.Name,
+				Args:     call.Function.Arguments,
+			})
 			if targetTool == nil {
 				resultContent = fmt.Sprintf("Error: tool %q not found", call.Function.Name)
 				hasExecErr = true
@@ -341,6 +374,16 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 					resultContent = res.Content
 				}
 			}
+			a.EmitEvent(AgentEvent{
+				Type:     EventToolCallEnd,
+				Turn:     turn,
+				CallID:   call.ID,
+				ToolName: call.Function.Name,
+				Args:     call.Function.Arguments,
+				Result:   resultContent,
+				IsError:  hasExecErr,
+				Duration: time.Since(toolStart),
+			})
 
 			// 【工具执行完成】：更新状态为 completed / failed
 			if taskTree != nil {
