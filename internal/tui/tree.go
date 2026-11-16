@@ -38,6 +38,7 @@ type WorkflowTreeModel struct {
 	nodeOrder    []string
 	workflowName string
 	startTime    time.Time
+	endTime      time.Time
 	spinner      spinner.Model
 }
 
@@ -57,6 +58,21 @@ func NewWorkflowTreeModel() *WorkflowTreeModel {
 // SetWorkflowName 设置工作流名称
 func (m *WorkflowTreeModel) SetWorkflowName(name string) {
 	m.workflowName = name
+}
+
+// MarkStarted 标记工作流开始/恢复计时
+func (m *WorkflowTreeModel) MarkStarted() {
+	if m.startTime.IsZero() || !m.endTime.IsZero() {
+		m.startTime = time.Now()
+		m.endTime = time.Time{}
+	}
+}
+
+// MarkStopped 冻结 DAG 计时器（任务完成或出错时停止继续计时）
+func (m *WorkflowTreeModel) MarkStopped() {
+	if m.endTime.IsZero() {
+		m.endTime = time.Now()
+	}
 }
 
 // AddOrUpdateNode 插入或更新 DAG 节点状态
@@ -133,7 +149,15 @@ func (m *WorkflowTreeModel) Render(width, height int) string {
 	}
 
 	var lines []string
-	elapsed := time.Since(m.startTime).Round(100 * time.Millisecond)
+	var elapsed time.Duration
+	if !m.endTime.IsZero() {
+		elapsed = m.endTime.Sub(m.startTime).Round(100 * time.Millisecond)
+	} else {
+		elapsed = time.Since(m.startTime).Round(100 * time.Millisecond)
+	}
+	if elapsed < 0 {
+		elapsed = 0
+	}
 	title := m.workflowName
 	if title == "" {
 		title = "DAG 任务拓扑"

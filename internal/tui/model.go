@@ -198,6 +198,7 @@ func (m *MainUIModel) cycleNextTab() {
 	}
 	idx := m.activeTabIndex()
 	m.activeTabID = m.tabIDs[(idx+1)%len(m.tabIDs)]
+	m.syncActiveBuffer(true)
 }
 
 func (m *MainUIModel) cyclePrevTab() {
@@ -206,6 +207,7 @@ func (m *MainUIModel) cyclePrevTab() {
 	}
 	idx := m.activeTabIndex()
 	m.activeTabID = m.tabIDs[(idx-1+len(m.tabIDs))%len(m.tabIDs)]
+	m.syncActiveBuffer(true)
 }
 
 func (m *MainUIModel) syncActiveBuffer(autoScroll bool) {
@@ -378,6 +380,9 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case TurnStartMsg:
 			buf := m.EnsureAgentBuffer(specMsg.AgentID, "")
 			buf.Transcript.StartTurn(m.config)
+			if specMsg.AgentID == "" || specMsg.AgentID == PrimaryAgentID {
+				m.workflowTree.MarkStarted()
+			}
 			m.working.Active = true
 			m.working.TaskDesc = "Simmering…"
 			m.working.ToolName = ""
@@ -392,8 +397,11 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				outcome = "completed"
 			}
 			buf.Transcript.FinishTurn(outcome, m.config)
-			m.working.Active = false
-			m.working.ToolName = ""
+			if specMsg.AgentID == "" || specMsg.AgentID == PrimaryAgentID {
+				m.workflowTree.MarkStopped()
+				m.working.Active = false
+				m.working.ToolName = ""
+			}
 			if m.footer != nil {
 				m.footer.RefreshGit()
 			}
@@ -524,6 +532,8 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case ErrorMsg:
 			if specMsg.Err != nil {
+				m.workflowTree.MarkStopped()
+				m.working.Active = false
 				if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 					activeBuf.RawTextBuffer += "\n[Error]: " + specMsg.Err.Error() + "\n"
 					activeBuf.Transcript.AddError(specMsg.Err.Error())
@@ -655,7 +665,7 @@ func (m *MainUIModel) View() string {
 	var elements []string
 
 	if len(m.tabIDs) > 1 {
-		elements = append(elements, m.renderTabBar())
+		elements = append(elements, lipgloss.NewStyle().MaxWidth(width).MaxHeight(1).Render(m.renderTabBar()))
 	}
 
 	bodyW, bodyH := m.computeBodySize(width, height)

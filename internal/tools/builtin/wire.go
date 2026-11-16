@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"gp/internal/agent"
@@ -76,8 +77,35 @@ func WireSubagentRunnerWithHooks(reg *tools.Registry, prov ai.Provider, modelNam
 		return fmt.Errorf("wire subagent runner: tool %q has unexpected type %T", "subagent", tool)
 	}
 
+	var activeMu sync.Mutex
+	activeIDs := make(map[string]bool)
+
+	allocateChildID := func(role string) string {
+		base := "sub_" + sanitizeID(role)
+		activeMu.Lock()
+		defer activeMu.Unlock()
+		if !activeIDs[base] {
+			activeIDs[base] = true
+			return base
+		}
+		for i := 2; ; i++ {
+			cand := fmt.Sprintf("%s_%d", base, i)
+			if !activeIDs[cand] {
+				activeIDs[cand] = true
+				return cand
+			}
+		}
+	}
+
+	releaseChildID := func(id string) {
+		activeMu.Lock()
+		delete(activeIDs, id)
+		activeMu.Unlock()
+	}
+
 	sub.SetRunner(func(ctx context.Context, role, taskPrompt string, st *session.SessionTree, scopedReg *tools.Registry) (string, error) {
-		childID := fmt.Sprintf("sub_%s_%d", sanitizeID(role), time.Now().UnixNano())
+		childID := allocateChildID(role)
+		defer releaseChildID(childID)
 		child := agent.NewAgent(childID, role, prov, modelName, scopedReg)
 		child.SetCwd(cwd)
 		if st != nil {

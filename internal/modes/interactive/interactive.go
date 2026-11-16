@@ -158,11 +158,6 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		_ = err
 	}
 
-	// 接线真实子 Agent 执行器，避免 subagent 工具退化为空回执 stub
-	if err := builtin.WireSubagentRunner(reg, prov, modelName, cwd); err != nil {
-		_ = err
-	}
-
 	var store storage.Storage = r.opts.Storage
 	var shouldCloseStore bool
 	if store == nil && r.opts.DBPath != "" {
