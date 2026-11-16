@@ -69,6 +69,17 @@ type AgentStatusChangedMsg struct {
 	ToolName  string
 }
 
+// AgentFlowMsg 主 Agent 与子 Agent 之间的派发与返回数据流事件
+type AgentFlowMsg struct {
+	ParentID  string
+	ChildID   string
+	Role      string
+	Direction string // "dispatch" | "return"
+	Payload   string
+	IsError   bool
+	Duration  time.Duration
+}
+
 // DAGNodeStatusMsg DAG 拓扑节点状态变更消息
 type DAGNodeStatusMsg struct {
 	NodeID      string

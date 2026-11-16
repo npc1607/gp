@@ -10,6 +10,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// PrimaryAgentID 主协调 Agent 的默认标识
+const PrimaryAgentID = "root"
+
 // HeaderInfo 包含终端会话基础元数据（Model、Provider、SessionID、Cwd 等）
 type HeaderInfo struct {
 	AppName       string
@@ -59,8 +62,8 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 		header:       header,
 		config:       cfg,
 		theme:        th,
-		activeTabID:  "main",
-		tabIDs:       []string{"main"},
+		activeTabID:  PrimaryAgentID,
+		tabIDs:       []string{PrimaryAgentID},
 		agentBuffers: make(map[string]*AgentViewBuffer),
 		workflowTree: NewWorkflowTreeModel(),
 		tray:         NewActiveTrayModel(),
@@ -74,9 +77,9 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 	}
 
 	bodyW, bodyH := m.computeBodySize(defaultWidth, defaultHeight)
-	mainBuf := NewAgentViewBuffer("main", "Orchestrator", bodyW, bodyH)
+	mainBuf := NewAgentViewBuffer(PrimaryAgentID, "Orchestrator", bodyW, bodyH)
 	mainBuf.SetModelInfo(header.ModelName, header.ProviderName)
-	m.agentBuffers["main"] = mainBuf
+	m.agentBuffers[PrimaryAgentID] = mainBuf
 
 	return m
 }
@@ -127,7 +130,7 @@ func (m *MainUIModel) resizeAllBuffers() {
 // EnsureAgentBuffer 确保指定 Agent 的缓冲区已初始化并在选项卡中登记
 func (m *MainUIModel) EnsureAgentBuffer(agentID, roleName string) *AgentViewBuffer {
 	if agentID == "" {
-		agentID = "main"
+		agentID = PrimaryAgentID
 	}
 	buf, exists := m.agentBuffers[agentID]
 	if !exists {
@@ -434,6 +437,59 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, tea.Batch(cmds...)
 
+		case AgentFlowMsg:
+			parentID := specMsg.ParentID
+			if parentID == "" {
+				parentID = PrimaryAgentID
+			}
+			pBuf := m.EnsureAgentBuffer(parentID, "")
+			pBuf.Transcript.RecordAgentFlow(specMsg)
+
+			cBuf := m.EnsureAgentBuffer(specMsg.ChildID, specMsg.Role)
+			if specMsg.Direction == "dispatch" {
+				cBuf.SetStatus("RUNNING", "")
+				if specMsg.Payload != "" {
+					cBuf.Transcript.AddUserMessage(specMsg.Payload, time.Now())
+					cBuf.Dirty = true
+				}
+				m.workflowTree.AddOrUpdateNode(DAGNodeStatusMsg{
+					NodeID: specMsg.ChildID,
+					Role:   specMsg.Role,
+					Status: "RUNNING",
+				})
+				m.tray.UpdateCoroutine(ActiveCoroutineMsg{
+					AgentID:  specMsg.ChildID,
+					Role:     specMsg.Role,
+					TaskDesc: ClipToWidth(strings.Join(strings.Fields(specMsg.Payload), " "), 40, "…"),
+					Active:   true,
+				})
+			} else {
+				status := "DONE"
+				errMsg := ""
+				if specMsg.IsError {
+					status = "FAILED"
+					errMsg = specMsg.Payload
+				}
+				cBuf.SetStatus(status, "")
+				m.workflowTree.AddOrUpdateNode(DAGNodeStatusMsg{
+					NodeID:   specMsg.ChildID,
+					Role:     specMsg.Role,
+					Status:   status,
+					Output:   specMsg.Payload,
+					ErrorMsg: errMsg,
+				})
+				m.tray.UpdateCoroutine(ActiveCoroutineMsg{
+					AgentID: specMsg.ChildID,
+					Active:  false,
+				})
+			}
+			if len(m.tray.order) > 0 {
+				m.working.Active = true
+				m.working.ToolName = fmt.Sprintf("%d subagents", len(m.tray.order))
+			}
+			pBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), parentID == m.activeTabID)
+			return m, tea.Batch(cmds...)
+
 		case DAGNodeStatusMsg:
 			m.workflowTree.AddOrUpdateNode(specMsg)
 			return m, tea.Batch(cmds...)
@@ -548,19 +604,41 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 
 func (m *MainUIModel) renderTabBar() string {
 	var tabs []string
+	sp := m.working.SpinnerGlyph(m.config.WorkingSpinner)
+	if sp == "" {
+		sp = "◐"
+	}
 	for i, id := range m.tabIDs {
 		buf := m.agentBuffers[id]
 		label := id
-		if buf != nil && buf.RoleName != "" {
-			label = fmt.Sprintf("%d:%s", i+1, buf.RoleName)
+		statusGlyph := "○"
+		statusColor := m.theme.Muted
+		if buf != nil {
+			if buf.RoleName != "" {
+				label = fmt.Sprintf("%d:%s", i+1, buf.RoleName)
+			}
+			switch strings.ToUpper(buf.Status) {
+			case "RUNNING":
+				if id != PrimaryAgentID || m.working.Active {
+					statusGlyph = sp
+					statusColor = m.theme.Warning
+				}
+			case "DONE":
+				statusGlyph = "✓"
+				statusColor = m.theme.Success
+			case "FAILED":
+				statusGlyph = "✗"
+				statusColor = m.theme.Error
+			}
 		}
 		if id == m.activeTabID {
 			tabs = append(tabs, m.theme.BoldFg(m.theme.Accent, "● "+label))
 		} else {
-			tabs = append(tabs, m.theme.Fg(m.theme.Muted, "○ "+label))
+			tabs = append(tabs, m.theme.Fg(statusColor, statusGlyph)+" "+m.theme.Fg(m.theme.Muted, label))
 		}
 	}
-	return ClipToWidth(" "+strings.Join(tabs, m.theme.Fg(m.theme.BorderMuted, " │ ")), m.width, "…")
+	hint := m.theme.Fg(m.theme.Dim, "  (Tab switch · Ctrl+G dag)")
+	return ClipToWidth(" "+strings.Join(tabs, m.theme.Fg(m.theme.BorderMuted, " │ "))+hint, m.width, "…")
 }
 
 // View 渲染完整 pi-tidy + pi-zentui 界面

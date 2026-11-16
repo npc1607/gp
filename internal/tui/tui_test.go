@@ -104,7 +104,7 @@ func TestTUI_TC_TUI_002_TabCycling(t *testing.T) {
 	}{
 		{step: 1, keyMsg: tea.KeyMsg{Type: tea.KeyTab}, want: "scout"},
 		{step: 2, keyMsg: tea.KeyMsg{Type: tea.KeyTab}, want: "impl"},
-		{step: 3, keyMsg: tea.KeyMsg{Type: tea.KeyTab}, want: "main"},
+		{step: 3, keyMsg: tea.KeyMsg{Type: tea.KeyTab}, want: PrimaryAgentID},
 	}
 
 	for _, step := range inputs {
@@ -149,18 +149,18 @@ func TestTUI_TC_TUI_004_SingleOrEmptyTabBoundary(t *testing.T) {
 		{
 			name: "single_tab_next",
 			setupModel: func(m *MainUIModel) {
-				// 仅有默认的 "main" Tab
+				// 仅有默认的 PrimaryAgentID Tab
 			},
 			inputKey: tea.KeyMsg{Type: tea.KeyTab},
-			wantTab:  "main",
+			wantTab:  PrimaryAgentID,
 		},
 		{
 			name: "single_tab_prev",
 			setupModel: func(m *MainUIModel) {
-				// 仅有默认的 "main" Tab
+				// 仅有默认的 PrimaryAgentID Tab
 			},
 			inputKey: tea.KeyMsg{Type: tea.KeyShiftTab},
-			wantTab:  "main",
+			wantTab:  PrimaryAgentID,
 		},
 		{
 			name: "empty_tab_next",
@@ -404,11 +404,11 @@ func TestTUI_TC_TUI_010_ViewportIndependentScroll(t *testing.T) {
 		lines.WriteString(fmt.Sprintf("Line %03d: output log entry\n", i))
 	}
 	_, _ = m.Update(AgentStreamDeltaMsg{
-		AgentID:   "main",
+		AgentID:   PrimaryAgentID,
 		DeltaText: lines.String(),
 	})
 
-	mainBuf := m.AgentBuffer("main")
+	mainBuf := m.AgentBuffer(PrimaryAgentID)
 	subBuf := m.AgentBuffer("sub")
 
 	initMainYOffset := mainBuf.Viewport.YOffset
@@ -649,14 +649,14 @@ func TestTUI_PiTidy_TurnAndToolGroupFolding(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 35})
 
 	_, _ = m.Update(UserSubmitPromptMsg{Prompt: "inspect repo"})
-	_, _ = m.Update(TurnStartMsg{AgentID: "main", Turn: 0})
-	_, _ = m.Update(AgentThinkingDeltaMsg{AgentID: "main", ThinkingDelta: "checking files first"})
-	_, _ = m.Update(ToolCallStartMsg{AgentID: "main", CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"git status"}`})
-	_, _ = m.Update(ToolCallEndMsg{AgentID: "main", CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"git status"}`, Result: "clean\n", Duration: 120 * time.Millisecond})
-	_, _ = m.Update(ToolCallStartMsg{AgentID: "main", CallID: "c2", ToolName: "read", ArgsRaw: `{"path":"go.mod"}`})
-	_, _ = m.Update(ToolCallEndMsg{AgentID: "main", CallID: "c2", ToolName: "read", ArgsRaw: `{"path":"go.mod"}`, Result: "module gp\n", Duration: 50 * time.Millisecond})
-	_, _ = m.Update(AgentStreamDeltaMsg{AgentID: "main", DeltaText: "All clean with `go.mod` and #89b4fa."})
-	_, _ = m.Update(TurnEndMsg{AgentID: "main", Turn: 0, Outcome: "completed"})
+	_, _ = m.Update(TurnStartMsg{AgentID: PrimaryAgentID, Turn: 0})
+	_, _ = m.Update(AgentThinkingDeltaMsg{AgentID: PrimaryAgentID, ThinkingDelta: "checking files first"})
+	_, _ = m.Update(ToolCallStartMsg{AgentID: PrimaryAgentID, CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"git status"}`})
+	_, _ = m.Update(ToolCallEndMsg{AgentID: PrimaryAgentID, CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"git status"}`, Result: "clean\n", Duration: 120 * time.Millisecond})
+	_, _ = m.Update(ToolCallStartMsg{AgentID: PrimaryAgentID, CallID: "c2", ToolName: "read", ArgsRaw: `{"path":"go.mod"}`})
+	_, _ = m.Update(ToolCallEndMsg{AgentID: PrimaryAgentID, CallID: "c2", ToolName: "read", ArgsRaw: `{"path":"go.mod"}`, Result: "module gp\n", Duration: 50 * time.Millisecond})
+	_, _ = m.Update(AgentStreamDeltaMsg{AgentID: PrimaryAgentID, DeltaText: "All clean with `go.mod` and #89b4fa."})
+	_, _ = m.Update(TurnEndMsg{AgentID: PrimaryAgentID, Turn: 0, Outcome: "completed"})
 
 	view := m.View()
 	// 1. User message framed
@@ -717,8 +717,8 @@ func TestTUI_PiTidy_SplitDiffAndRuledCodeBlocks(t *testing.T) {
 func TestTUI_PiZentui_EditorWorkingLineAndFooter(t *testing.T) {
 	m := createTestMainUIModel(t, nil)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	_, _ = m.Update(TurnStartMsg{AgentID: "main", Turn: 0})
-	_, _ = m.Update(ToolCallStartMsg{AgentID: "main", CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"go test"}`})
+	_, _ = m.Update(TurnStartMsg{AgentID: PrimaryAgentID, Turn: 0})
+	_, _ = m.Update(ToolCallStartMsg{AgentID: PrimaryAgentID, CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"go test"}`})
 	_, _ = m.Update(TokenUsageMsg{InputTokens: 1200, OutputTokens: 350, TotalTokens: 1550})
 
 	view := m.View()
@@ -737,5 +737,42 @@ func TestTUI_PiZentui_EditorWorkingLineAndFooter(t *testing.T) {
 	}
 	if got := m.Config().FooterStyle; got != "hidden" {
 		t.Fatalf("expected hidden footer style after /zentui preset minimalist, got %q", got)
+	}
+}
+
+func TestTUI_SubagentDataFlowAndTabs(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 35})
+
+	_, _ = m.Update(TurnStartMsg{AgentID: PrimaryAgentID, Turn: 0})
+	_, _ = m.Update(ToolCallStartMsg{
+		AgentID:  PrimaryAgentID,
+		CallID:   "call_sub_1",
+		ToolName: "subagent",
+		ArgsRaw:  `{"tasks":[{"agent":"pro1","task":"argue for speed"},{"agent":"con1","task":"argue for craft"}]}`,
+	})
+	_, _ = m.Update(AgentFlowMsg{
+		ParentID:  PrimaryAgentID,
+		ChildID:   "sub_pro1_1",
+		Role:      "pro1",
+		Direction: "dispatch",
+		Payload:   "argue for speed",
+	})
+	_, _ = m.Update(AgentStreamDeltaMsg{AgentID: "sub_pro1_1", DeltaText: "Speed wins!"})
+	_, _ = m.Update(AgentFlowMsg{
+		ParentID:  PrimaryAgentID,
+		ChildID:   "sub_pro1_1",
+		Role:      "pro1",
+		Direction: "return",
+		Payload:   "Speed wins!",
+		Duration:  400 * time.Millisecond,
+	})
+
+	view := m.View()
+	if !strings.Contains(view, PrimaryAgentID+" ──▶") || !strings.Contains(view, "pro1") || !strings.Contains(view, "Speed wins!") {
+		t.Fatalf("expected subagent data flow in main view, got:\n%s", view)
+	}
+	if !strings.Contains(view, "2:pro1") {
+		t.Fatalf("expected subagent tab 2:pro1 in tab bar, got:\n%s", view)
 	}
 }

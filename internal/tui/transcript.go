@@ -87,10 +87,24 @@ type TurnItem struct {
 	FinalText  string
 }
 
+// AgentFlowEntry 记录主 Agent 与子 Agent 之间的一次派发与返回数据流
+type AgentFlowEntry struct {
+	ParentID  string
+	ChildID   string
+	Role      string
+	TaskIn    string
+	ResultOut string
+	IsError   bool
+	Pending   bool
+	StartTime time.Time
+	Duration  time.Duration
+}
+
 // Transcript 管理单个 Agent 的结构化对话历史与折叠状态
 type Transcript struct {
 	Items      []*TranscriptItem
 	HitRegions []HitRegion
+	Flows      []*AgentFlowEntry
 	Model      string
 	Provider   string
 	AllOpen    bool
@@ -100,6 +114,29 @@ func NewTranscript(model, provider string) *Transcript {
 	return &Transcript{
 		Model:    model,
 		Provider: provider,
+	}
+}
+
+func (tr *Transcript) RecordAgentFlow(msg AgentFlowMsg) {
+	if msg.Direction == "dispatch" {
+		tr.Flows = append(tr.Flows, &AgentFlowEntry{
+			ParentID:  msg.ParentID,
+			ChildID:   msg.ChildID,
+			Role:      msg.Role,
+			TaskIn:    msg.Payload,
+			Pending:   true,
+			StartTime: time.Now(),
+		})
+		return
+	}
+	for i := len(tr.Flows) - 1; i >= 0; i-- {
+		if tr.Flows[i].ChildID == msg.ChildID {
+			tr.Flows[i].Pending = false
+			tr.Flows[i].ResultOut = msg.Payload
+			tr.Flows[i].IsError = msg.IsError
+			tr.Flows[i].Duration = msg.Duration
+			return
+		}
 	}
 }
 
@@ -593,13 +630,13 @@ func (tr *Transcript) renderTurnItem(turnIdx int, turn *TurnItem, baseLine int, 
 			gLines := tr.renderToolGroup(turnIdx, stepIdx, st.Group, baseLine+len(out), innerW, t, cfg, spinnerGlyph, railPrefix)
 			out = append(out, gLines...)
 
-		case "tool_box":
+			case "tool_box":
 			startL := baseLine + len(out)
 			boxW := innerW
 			if railActive {
 				boxW = innerW - 1
 			}
-			bLines := renderToolBox(st.Tool, boxW, t, cfg, spinnerGlyph)
+			bLines := tr.renderToolBox(st.Tool, boxW, t, cfg, spinnerGlyph)
 			for _, bl := range bLines {
 				if railActive {
 					out = append(out, railPrefix+" "+bl)
@@ -662,7 +699,7 @@ func renderFinalReply(text string, turn *TurnItem, width int, t Theme, cfg UICon
 	mdLines := RenderMarkdownWithCodeBlocks(text, innerW-2, t, cfg, assistantColor, true)
 	padded := make([]string, len(mdLines))
 	for i, ml := range mdLines {
-		padded[i] = " " + ml
+		padded[i] = " " + ClipToWidth(ml, innerW-1, "…")
 	}
 	framed := DrawFrame(padded, width, t, assistantColor, label, "left", lead)
 	if joinRail && len(framed) > 0 {
@@ -892,7 +929,7 @@ func (tr *Transcript) renderToolGroup(turnIdx, stepIdx int, g *ToolGroup, baseLi
 		row := formatToolRow(tc, width-3, t, cfg, spinnerGlyph)
 		out = append(out, outerRail+gutter+row)
 		if tc.Expanded {
-			boxLines := renderToolBox(tc, width-4, t, cfg, spinnerGlyph)
+			boxLines := tr.renderToolBox(tc, width-4, t, cfg, spinnerGlyph)
 			for _, bl := range boxLines {
 				out = append(out, outerRail+gutter+bl)
 			}
@@ -974,7 +1011,7 @@ func formatToolRow(tc *ToolCallItem, width int, t Theme, cfg UIConfig, spinnerGl
 	return clippedLeft + strings.Repeat(" ", gap) + tail
 }
 
-func renderToolBox(tc *ToolCallItem, width int, t Theme, cfg UIConfig, spinnerGlyph string) []string {
+func (tr *Transcript) renderToolBox(tc *ToolCallItem, width int, t Theme, cfg UIConfig, spinnerGlyph string) []string {
 	if width < 16 {
 		width = 16
 	}
@@ -1063,6 +1100,9 @@ func renderToolBox(tc *ToolCallItem, width int, t Theme, cfg UIConfig, spinnerGl
 			body = append(body, renderToolResultBody(tc.Result, innerW, maxR, tc.Expanded || tc.IsError, t)...)
 		}
 
+	case "subagent":
+		body = tr.renderSubagentFlowBody(tc, argsMap, innerW, t, spinnerGlyph)
+
 	default:
 		if arg := extractToolArgSummary(tc.ToolName, tc.ArgsRaw); arg != "" {
 			body = append(body, t.Fg(t.Muted, ClipToWidth(arg, innerW, "…")))
@@ -1087,6 +1127,89 @@ func renderToolBox(tc *ToolCallItem, width int, t Theme, cfg UIConfig, spinnerGl
 		body[i] = " " + body[i]
 	}
 	return DrawFrame(body, width, t, borderColor, topLabel, "left", 1)
+}
+
+func (tr *Transcript) renderSubagentFlowBody(tc *ToolCallItem, argsMap map[string]any, width int, t Theme, spinnerGlyph string) []string {
+	var out []string
+	rawTasks, _ := argsMap["tasks"].([]any)
+	type taskSpec struct {
+		role string
+		task string
+	}
+	var specs []taskSpec
+	for _, rt := range rawTasks {
+		if m, ok := rt.(map[string]any); ok {
+			ag, _ := m["agent"].(string)
+			tk, _ := m["task"].(string)
+			specs = append(specs, taskSpec{role: ag, task: tk})
+		}
+	}
+
+	// 将实时 Flows 匹配到本次 subagent 调用的任务（按角色与时间顺序）
+	used := make(map[int]bool)
+	for _, sp := range specs {
+		var matched *AgentFlowEntry
+		for i, fl := range tr.Flows {
+			if used[i] || fl.Role != sp.role {
+				continue
+			}
+			if !tc.StartTime.IsZero() && fl.StartTime.Before(tc.StartTime.Add(-200*time.Millisecond)) {
+				continue
+			}
+			matched = fl
+			used[i] = true
+			break
+		}
+
+		statusGlyph := t.Fg(t.Warning, spinnerGlyph)
+		durStr := ""
+		if matched != nil {
+			if matched.Pending {
+				if spinnerGlyph == "" {
+					statusGlyph = t.Fg(t.Warning, "⋯")
+				}
+				durStr = formatShortDuration(time.Since(matched.StartTime))
+			} else if matched.IsError {
+				statusGlyph = t.Fg(t.Error, "✗")
+				durStr = formatShortDuration(matched.Duration)
+			} else {
+				statusGlyph = t.Fg(t.Success, "✓")
+				durStr = formatShortDuration(matched.Duration)
+			}
+		} else if !tc.Pending {
+			statusGlyph = t.Fg(t.Success, "✓")
+		}
+
+		parentLabel := PrimaryAgentID
+		if matched != nil && matched.ParentID != "" {
+			parentLabel = matched.ParentID
+		}
+		head := fmt.Sprintf("%s %s %s",
+			statusGlyph,
+			t.Fg(t.Muted, parentLabel+" ──▶"),
+			t.BoldFg(t.Accent, sp.role),
+		)
+		if durStr != "" {
+			head += " " + t.Fg(t.Muted, durStr)
+		}
+		out = append(out, ClipToWidth(head, width, "…"))
+
+		inFlat := strings.Join(strings.Fields(sp.task), " ")
+		if inFlat != "" {
+			out = append(out, t.Fg(t.Muted, "  in : ")+t.Fg(t.Dim, ClipToWidth(inFlat, width-7, "…")))
+		}
+		if matched != nil && strings.TrimSpace(matched.ResultOut) != "" {
+			outFlat := strings.Join(strings.Fields(matched.ResultOut), " ")
+			out = append(out, t.Fg(t.Success, "  out: ")+t.Fg(t.Text, ClipToWidth(outFlat, width-7, "…")))
+		} else if matched != nil && matched.Pending {
+			out = append(out, t.Fg(t.Warning, "  out: ")+t.ItalicFg(t.Dim, "streaming… (Tab to inspect)"))
+		}
+	}
+
+	if len(out) == 0 && tc.Result != "" {
+		return renderToolResultBody(tc.Result, width, 10, tc.Expanded, t)
+	}
+	return out
 }
 
 func renderWritePreview(content string, width, maxLines int, t Theme) []string {
@@ -1163,6 +1286,21 @@ func extractToolArgSummary(toolName, raw string) string {
 		}
 		if q, ok := m["query"].(string); ok {
 			return q
+		}
+	case "subagent":
+		if tasks, ok := m["tasks"].([]any); ok && len(tasks) > 0 {
+			var roles []string
+			for _, rt := range tasks {
+				if tm, ok := rt.(map[string]any); ok {
+					if ag, ok := tm["agent"].(string); ok && ag != "" {
+						roles = append(roles, ag)
+					}
+				}
+			}
+			if len(roles) > 0 {
+				return fmt.Sprintf("%d tasks: %s", len(roles), strings.Join(roles, ", "))
+			}
+			return fmt.Sprintf("%d tasks", len(tasks))
 		}
 	}
 	for _, v := range m {

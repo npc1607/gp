@@ -42,7 +42,7 @@ func DefaultUIConfig() UIConfig {
 		MessageHeaderStyle: "inline",
 		GroupTools:         true,
 		GroupOpen:          false,
-		AlwaysShowTools:    []string{"edit", "write"},
+		AlwaysShowTools:    []string{"edit", "write", "subagent"},
 		BashResultLines:    1,
 		WriteLines:         10,
 		DiffLines:          20,

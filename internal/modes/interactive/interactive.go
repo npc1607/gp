@@ -85,6 +85,79 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		return fmt.Errorf("resolve registry: %w", err)
 	}
 
+	var p *tea.Program
+
+	// 接线真实子 Agent 执行器，并将子 Agent 状态、流式输出与数据流实时转发到 TUI
+	if err := builtin.WireSubagentRunnerWithHooks(reg, prov, modelName, cwd, builtin.SubagentHooks{
+		OnLifecycle: func(ev builtin.SubagentEvent) {
+			if p == nil {
+				return
+			}
+			if ev.Type == "start" {
+				p.Send(tui.AgentFlowMsg{
+					ParentID:  tui.PrimaryAgentID,
+					ChildID:   ev.ChildID,
+					Role:      ev.Role,
+					Direction: "dispatch",
+					Payload:   ev.TaskPrompt,
+				})
+			} else {
+				payload := ev.Output
+				isErr := ev.Err != nil
+				if isErr {
+					payload = ev.Err.Error()
+				}
+				p.Send(tui.AgentFlowMsg{
+					ParentID:  tui.PrimaryAgentID,
+					ChildID:   ev.ChildID,
+					Role:      ev.Role,
+					Direction: "return",
+					Payload:   payload,
+					IsError:   isErr,
+					Duration:  ev.Duration,
+				})
+			}
+		},
+		OnStream: func(agentID string, chunk ai.StreamChunk) {
+			if p == nil {
+				return
+			}
+			if chunk.ThinkingDelta != "" {
+				p.Send(tui.AgentThinkingDeltaMsg{
+					AgentID:       agentID,
+					ThinkingDelta: chunk.ThinkingDelta,
+				})
+			}
+			if chunk.DeltaText != "" {
+				p.Send(tui.AgentStreamDeltaMsg{
+					AgentID:   agentID,
+					DeltaText: chunk.DeltaText,
+				})
+			}
+		},
+		OnAgentEvent: func(ev agent.AgentEvent) {
+			if p == nil {
+				return
+			}
+			switch ev.Type {
+			case agent.EventTurnStart:
+				p.Send(tui.TurnStartMsg{AgentID: ev.AgentID, Turn: ev.Turn})
+			case agent.EventTurnEnd:
+				p.Send(tui.TurnEndMsg{AgentID: ev.AgentID, Turn: ev.Turn, Outcome: ev.Outcome, Duration: ev.Duration})
+			case agent.EventToolCallStart:
+				p.Send(tui.ToolCallStartMsg{AgentID: ev.AgentID, CallID: ev.CallID, ToolName: ev.ToolName, ArgsRaw: string(ev.Args)})
+			case agent.EventToolCallEnd:
+				p.Send(tui.ToolCallEndMsg{AgentID: ev.AgentID, CallID: ev.CallID, ToolName: ev.ToolName, ArgsRaw: string(ev.Args), Result: ev.Result, IsError: ev.IsError, Duration: ev.Duration})
+			case agent.EventUsage:
+				if ev.Usage != nil {
+					p.Send(tui.TokenUsageMsg{InputTokens: ev.Usage.InputTokens, OutputTokens: ev.Usage.OutputTokens, TotalTokens: ev.Usage.TotalTokens})
+				}
+			}
+		},
+	}); err != nil {
+		_ = err
+	}
+
 	// 接线真实子 Agent 执行器，避免 subagent 工具退化为空回执 stub
 	if err := builtin.WireSubagentRunner(reg, prov, modelName, cwd); err != nil {
 		_ = err
@@ -104,7 +177,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 
 	sessID := fmt.Sprintf("sess_%d", time.Now().UnixNano()%1000000)
 
-	ag := agent.NewAgent("main", "orchestrator", prov, modelName, reg)
+	ag := agent.NewAgent(tui.PrimaryAgentID, "orchestrator", prov, modelName, reg)
 	ag.SetCwd(cwd)
 
 	homeDir, _ := os.UserHomeDir()
@@ -139,8 +212,6 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		TokenUsage:    "0 tok",
 		Cwd:           cwd,
 	}
-
-	var p *tea.Program
 
 	ag.SetEventHandler(func(ev agent.AgentEvent) {
 		if p == nil {
@@ -193,13 +264,13 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		}
 		if chunk.ThinkingDelta != "" {
 			p.Send(tui.AgentThinkingDeltaMsg{
-				AgentID:       "main",
+				AgentID:       tui.PrimaryAgentID,
 				ThinkingDelta: chunk.ThinkingDelta,
 			})
 		}
 		if chunk.DeltaText != "" {
 			p.Send(tui.AgentStreamDeltaMsg{
-				AgentID:   "main",
+				AgentID:   tui.PrimaryAgentID,
 				DeltaText: chunk.DeltaText,
 			})
 		}
@@ -217,7 +288,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			defer isRunning.Store(false)
 			if p != nil {
 				p.Send(tui.ActiveCoroutineMsg{
-					AgentID:  "main",
+					AgentID:  tui.PrimaryAgentID,
 					TaskDesc: "Simmering…",
 					Active:   true,
 				})
@@ -225,11 +296,11 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			_, promptErr := ag.Prompt(ctx, userPrompt)
 			if p != nil {
 				p.Send(tui.ActiveCoroutineMsg{
-					AgentID: "main",
+					AgentID: tui.PrimaryAgentID,
 					Active:  false,
 				})
 				if promptErr != nil {
-					p.Send(tui.TurnEndMsg{AgentID: "main", Outcome: "error"})
+					p.Send(tui.TurnEndMsg{AgentID: tui.PrimaryAgentID, Outcome: "error"})
 					p.Send(tui.ErrorMsg{Err: promptErr})
 				}
 			}
