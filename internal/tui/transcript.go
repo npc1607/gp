@@ -30,10 +30,11 @@ type HitRegion struct {
 
 // TranscriptItem 标识对话记录中的顶层条目
 type TranscriptItem struct {
-	Kind    string // "user" | "turn" | "error"
+	Kind    string // "user" | "turn" | "error" | "notice"
 	User    *UserItem
 	Turn    *TurnItem
 	ErrItem *ErrorItem
+	Notice  string
 }
 
 type UserItem struct {
@@ -147,6 +148,17 @@ func (tr *Transcript) AddUserMessage(text string, ts time.Time) {
 	tr.Items = append(tr.Items, &TranscriptItem{
 		Kind: "user",
 		User: &UserItem{Text: text, Timestamp: ts},
+	})
+}
+
+func (tr *Transcript) AddNotice(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	tr.Items = append(tr.Items, &TranscriptItem{
+		Kind:   "notice",
+		Notice: msg,
 	})
 }
 
@@ -447,6 +459,9 @@ func (tr *Transcript) Render(width int, t Theme, cfg UIConfig, spinnerGlyph stri
 			lines = append(lines, "")
 		case "error":
 			lines = append(lines, renderErrorItem(item.ErrItem, width, t, cfg)...)
+			lines = append(lines, "")
+		case "notice":
+			lines = append(lines, " "+t.Fg(t.Success, item.Notice))
 			lines = append(lines, "")
 		case "turn":
 			turnLines := tr.renderTurnItem(idx, item.Turn, len(lines), width, t, cfg, spinnerGlyph)

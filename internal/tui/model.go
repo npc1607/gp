@@ -2,8 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
+
+	"gp/internal/core/auth"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,28 +26,36 @@ type HeaderInfo struct {
 	SessionID     string
 	TokenUsage    string
 	Cwd           string
+	BaseURL       string
+	APIKey        string
 }
 
 // MainUIModel 全局终端界面状态模型（融合 pi-tidy + pi-zentui 视觉与交互）
 type MainUIModel struct {
-	header       HeaderInfo
-	config       UIConfig
-	theme        Theme
-	activeTabID  string
-	tabIDs       []string
-	agentBuffers map[string]*AgentViewBuffer
-	workflowTree *WorkflowTreeModel
-	tray         *ActiveTrayModel
-	working      *WorkingLineState
-	footer       *FooterState
-	inputArea    textinput.Model
-	width        int
-	height       int
-	ready        bool
-	showDAG      bool
-	tickCount    int
-	onUserSubmit func(prompt string)
-	fpsTicker    time.Duration
+	header        HeaderInfo
+	config        UIConfig
+	theme         Theme
+	activeTabID   string
+	tabIDs        []string
+	agentBuffers  map[string]*AgentViewBuffer
+	workflowTree  *WorkflowTreeModel
+	tray          *ActiveTrayModel
+	working       *WorkingLineState
+	footer        *FooterState
+	authStore     *auth.Store
+	overlay       *OverlayState
+	askUser       *AskUserDialogState
+	inputArea     textinput.Model
+	width         int
+	height        int
+	ready         bool
+	showDAG       bool
+	tickCount     int
+	compCursor    int
+	onUserSubmit  func(prompt string)
+	onModelChange func(entry auth.ModelEntry) error
+	onAuthChange  func(providerID string)
+	fpsTicker     time.Duration
 }
 
 // NewMainUIModel 创建全局终端界面主模型
@@ -69,6 +80,8 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 		tray:         NewActiveTrayModel(),
 		working:      &WorkingLineState{},
 		footer:       NewFooterState(header.Cwd),
+		authStore:    auth.NewStore(""),
+		overlay:      &OverlayState{},
 		inputArea:    ti,
 		width:        defaultWidth,
 		height:       defaultHeight,
@@ -98,6 +111,16 @@ func (m *MainUIModel) computeBodySize(totalW, totalH int) (int, int) {
 	if len(m.tabIDs) > 1 {
 		deductH++
 	}
+	if compRows := m.completionMenuHeight(); compRows > 0 {
+		deductH += compRows
+	}
+	if m.askUser != nil && m.askUser.Active {
+		if m.askUser.Collapsed {
+			deductH += 1
+		} else {
+			deductH += 14
+		}
+	}
 	bodyH := totalH - deductH
 	if bodyH < 5 {
 		bodyH = 5
@@ -114,6 +137,20 @@ func (m *MainUIModel) computeBodySize(totalW, totalH int) (int, int) {
 		}
 	}
 	return bodyW, bodyH
+}
+
+func (m *MainUIModel) completionMenuHeight() int {
+	if m.overlay != nil && m.overlay.Kind != OverlayNone {
+		return 0
+	}
+	matches := MatchSlashCommands(m.inputArea.Value())
+	if len(matches) == 0 {
+		return 0
+	}
+	if len(matches) > 6 {
+		return 6
+	}
+	return len(matches)
 }
 
 func (m *MainUIModel) resizeAllBuffers() {
@@ -181,6 +218,23 @@ func (m *MainUIModel) InputArea() *textinput.Model {
 // Config 返回当前 UI 配置
 func (m *MainUIModel) Config() UIConfig {
 	return m.config
+}
+
+// SetAuthStore 注入自定义 auth.json 凭证存储
+func (m *MainUIModel) SetAuthStore(s *auth.Store) {
+	if s != nil {
+		m.authStore = s
+	}
+}
+
+// SetModelChangeHandler 注册 /model 切换模型时的运行时回调
+func (m *MainUIModel) SetModelChangeHandler(fn func(entry auth.ModelEntry) error) {
+	m.onModelChange = fn
+}
+
+// SetAuthChangeHandler 注册 /login 或 /logout 变更凭证时的回调
+func (m *MainUIModel) SetAuthChangeHandler(fn func(providerID string)) {
+	m.onAuthChange = fn
 }
 
 func (m *MainUIModel) activeTabIndex() int {
@@ -268,6 +322,60 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.HandleAskUserKey(msg) {
+			return m, nil
+		}
+		if m.HandleOverlayKey(msg) {
+			return m, nil
+		}
+		matches := MatchSlashCommands(m.inputArea.Value())
+		if len(matches) > 0 {
+			if m.compCursor >= len(matches) {
+				m.compCursor = len(matches) - 1
+			}
+			switch msg.String() {
+			case "up":
+				if m.compCursor > 0 {
+					m.compCursor--
+				}
+				return m, nil
+			case "down":
+				if m.compCursor < len(matches)-1 {
+					m.compCursor++
+				}
+				return m, nil
+			case "tab":
+				chosen := matches[m.compCursor]
+				m.inputArea.SetValue(chosen.Name + " ")
+				m.inputArea.CursorEnd()
+				m.compCursor = 0
+				m.resizeAllBuffers()
+				return m, nil
+			case "esc":
+				m.inputArea.Reset()
+				m.compCursor = 0
+				m.resizeAllBuffers()
+				return m, nil
+			case "enter":
+				// 若输入为不完整前缀（如 /mo），自动补全并执行选中指令
+				val := strings.TrimSpace(m.inputArea.Value())
+				exact := false
+				for _, cm := range matches {
+					if cm.Name == val {
+						exact = true
+						break
+					}
+				}
+				if !exact {
+					chosen := matches[m.compCursor]
+					m.inputArea.Reset()
+					m.compCursor = 0
+					m.resizeAllBuffers()
+					m.handleLocalCommand(chosen.Name)
+					return m, nil
+				}
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -335,7 +443,12 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		var cmd tea.Cmd
+		prevCompH := m.completionMenuHeight()
 		m.inputArea, cmd = m.inputArea.Update(msg)
+		if m.completionMenuHeight() != prevCompH {
+			m.compCursor = 0
+			m.resizeAllBuffers()
+		}
 		return m, cmd
 
 	case TickMsg:
@@ -541,6 +654,11 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, tea.Batch(cmds...)
+
+		case AskUserQuestionMsg:
+			m.askUser = NewAskUserDialogState(specMsg)
+			m.resizeAllBuffers()
+			return m, tea.Batch(cmds...)
 		}
 
 		if len(cmds) > 0 {
@@ -551,13 +669,88 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleLocalCommand 处理 /zentui, /tidy, /clear 等内置 UI 调节命令
+// handleLocalCommand 处理 /login, /logout, /model, /zentui, /tidy, /clear 等内置指令
 func (m *MainUIModel) handleLocalCommand(raw string) bool {
 	fields := strings.Fields(raw)
 	if len(fields) == 0 {
 		return false
 	}
 	switch fields[0] {
+	case "/login":
+		if len(fields) >= 3 {
+			target := auth.NormalizeProviderID(fields[1])
+			if spec, ok := auth.FindProviderSpec(target); ok {
+				m.applyLogin(spec.ID, strings.Join(fields[2:], " "))
+				return true
+			}
+		}
+		if len(fields) >= 2 {
+			target := auth.NormalizeProviderID(fields[1])
+			if spec, ok := auth.FindProviderSpec(target); ok {
+				m.overlay.Kind = OverlayLoginKey
+				m.overlay.TargetProv = spec.ID
+				m.overlay.InitKeyInput()
+				m.overlay.StatusNote = ""
+				return true
+			}
+		}
+		m.overlay.Kind = OverlayLoginSelect
+		m.overlay.Cursor = 0
+		m.overlay.Providers = auth.RegisteredProviders()
+		return true
+
+	case "/logout":
+		if len(fields) >= 2 {
+			m.applyLogout(fields[1])
+			return true
+		}
+		var ids []string
+		if m.authStore != nil {
+			if all, err := m.authStore.LoadAll(); err == nil {
+				for k := range all {
+					ids = append(ids, k)
+				}
+				sort.Strings(ids)
+			}
+		}
+		m.overlay.Kind = OverlayLogoutSelect
+		m.overlay.Cursor = 0
+		m.overlay.LoggedInIDs = ids
+		return true
+
+	case "/model", "/models":
+		if len(fields) == 2 && strings.ToLower(fields[1]) == "refresh" {
+			go func() {
+				for _, p := range auth.RegisteredProviders() {
+					_, _ = m.authStore.RefreshProviderModels(p.ID)
+				}
+			}()
+			m.addSystemNotice("Refreshing model catalog into SQLite in background...", false)
+			return true
+		}
+		models := m.authStore.ListModels(m.header.ModelName, m.header.BaseURL, m.header.APIKey)
+		query := ""
+		if len(fields) >= 2 {
+			query = strings.Join(fields[1:], " ")
+			// 若精确匹配某一个模型，直接切换（对齐 Pi /model <exact>）
+			var exactMatches []auth.ModelEntry
+			qNorm := strings.ToLower(strings.TrimSpace(query))
+			for _, me := range models {
+				if strings.ToLower(me.ID) == qNorm || strings.ToLower(me.FullName) == qNorm {
+					exactMatches = append(exactMatches, me)
+				}
+			}
+			if len(exactMatches) == 1 {
+				m.applyModelSelection(exactMatches[0])
+				return true
+			}
+		}
+		m.overlay.Kind = OverlayModelSelect
+		m.overlay.Cursor = 0
+		m.overlay.SearchQuery = query
+		m.overlay.Models = models
+		return true
+
 	case "/clear":
 		if buf, ok := m.agentBuffers[m.activeTabID]; ok {
 			buf.RawTextBuffer = ""
@@ -610,6 +803,90 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		return true
 	}
 	return false
+}
+
+func (m *MainUIModel) addSystemNotice(msg string, isErr bool) {
+	if buf, ok := m.agentBuffers[m.activeTabID]; ok {
+		if isErr {
+			buf.Transcript.AddError(msg)
+		} else {
+			buf.Transcript.AddNotice(msg)
+		}
+		buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+	}
+}
+
+func (m *MainUIModel) applyLogin(providerID, rawInput string) {
+	if m.authStore == nil {
+		m.authStore = auth.NewStore("")
+	}
+	parts := strings.Fields(strings.TrimSpace(rawInput))
+	if len(parts) == 0 {
+		return
+	}
+	token := parts[0]
+	spec, _ := auth.FindProviderSpec(providerID)
+	baseURL := spec.DefaultURL
+	if len(parts) >= 2 && (strings.HasPrefix(parts[1], "http://") || strings.HasPrefix(parts[1], "https://")) {
+		baseURL = strings.TrimRight(parts[1], "/")
+	} else if auth.NormalizeProviderID(providerID) == "qoder" && strings.HasPrefix(token, "sk-sp-") {
+		baseURL = "https://coding.dashscope.aliyuncs.com/v1"
+	}
+	cred := auth.Credential{
+		Type:    "api_key",
+		Key:     token,
+		BaseURL: baseURL,
+	}
+	if err := m.authStore.Set(providerID, cred); err != nil {
+		m.addSystemNotice(fmt.Sprintf("Login %s failed: %v", providerID, err), true)
+		return
+	}
+	go func() {
+		_, _ = m.authStore.RefreshProviderModels(providerID)
+	}()
+	if m.onAuthChange != nil {
+		m.onAuthChange(providerID)
+	}
+	m.addSystemNotice(fmt.Sprintf("✓ Logged in to %s (endpoint: %s, saved to %s)", providerID, baseURL, m.authStore.Path()), false)
+}
+
+func (m *MainUIModel) applyLogout(providerID string) {
+	if m.authStore == nil {
+		return
+	}
+	removed, err := m.authStore.Remove(providerID)
+	if err != nil {
+		m.addSystemNotice(fmt.Sprintf("Logout %s failed: %v", providerID, err), true)
+		return
+	}
+	if !removed {
+		m.addSystemNotice(fmt.Sprintf("No stored credentials for %s", providerID), false)
+		return
+	}
+	if m.onAuthChange != nil {
+		m.onAuthChange(providerID)
+	}
+	m.addSystemNotice(fmt.Sprintf("✓ Logged out of %s", providerID), false)
+}
+
+func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry) {
+	if m.onModelChange != nil {
+		if err := m.onModelChange(entry); err != nil {
+			m.addSystemNotice(fmt.Sprintf("Switch model failed: %v", err), true)
+			return
+		}
+	}
+	m.header.ModelName = entry.ID
+	if entry.Provider != "" {
+		m.header.ProviderName = entry.Provider
+	}
+	if entry.BaseURL != "" {
+		m.header.BaseURL = entry.BaseURL
+	}
+	for _, buf := range m.agentBuffers {
+		buf.SetModelInfo(m.header.ModelName, m.header.ProviderName)
+	}
+	m.addSystemNotice(fmt.Sprintf("✓ Model: %s", entry.FullName), false)
 }
 
 func (m *MainUIModel) renderTabBar() string {
@@ -699,6 +976,20 @@ func (m *MainUIModel) View() string {
 		elements = append(elements, mainView)
 	}
 
+	// rpiv-ask-user-question 交互式问卷弹层
+	if m.askUser != nil && m.askUser.Active {
+		if dlg := RenderAskUserDialog(m.askUser, width, m.theme); dlg != "" {
+			elements = append(elements, dlg)
+		}
+	}
+
+	// 交互式选择器弹层 (/model, /login, /logout)
+	if m.overlay != nil && m.overlay.Kind != OverlayNone {
+		if ov := RenderOverlay(m.overlay, width, m.header.ModelName, m.authStore, m.theme, m.config); ov != "" {
+			elements = append(elements, ov)
+		}
+	}
+
 	// pi-zentui Opencode Editor (内嵌 Working Line)
 	rightHint := "ctrl+o fold · ctrl+t think"
 	if len(m.workflowTree.nodes) > 0 {
@@ -711,6 +1002,13 @@ func (m *MainUIModel) View() string {
 		RightHint:     rightHint,
 	}, m.working)
 	elements = append(elements, editorStr)
+
+	// 斜杠指令补全提示菜单（紧贴编辑器下方，对齐 pi-zentui）
+	if matches := MatchSlashCommands(m.inputArea.Value()); len(matches) > 0 && (m.overlay == nil || m.overlay.Kind == OverlayNone) {
+		if comp := RenderCompletionMenu(matches, m.compCursor, width, m.theme); comp != "" {
+			elements = append(elements, comp)
+		}
+	}
 
 	// pi-zentui Starship Footer
 	if m.config.FooterStyle != "hidden" && m.footer != nil {
