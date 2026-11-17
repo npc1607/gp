@@ -133,7 +133,7 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 			}
 		}
 		lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
-		lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Enter switch · Esc cancel · type to filter"))
+		lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Enter switch · Ctrl+S save default · Esc cancel · type to filter"))
 
 	case OverlayLoginSelect:
 		title = t.BoldFg(t.Accent, "Login Provider")
@@ -243,7 +243,8 @@ func (m *MainUIModel) HandleOverlayKey(msg tea.KeyMsg) bool {
 				m.overlay.SearchQuery = string(rs[:len(rs)-1])
 				m.overlay.Cursor = 0
 			}
-		case "enter":
+		case "enter", "ctrl+s":
+			persist := key == "ctrl+s"
 			var chosen auth.ModelEntry
 			if len(filtered) > 0 && m.overlay.Cursor >= 0 && m.overlay.Cursor < len(filtered) {
 				chosen = filtered[m.overlay.Cursor]
@@ -253,7 +254,7 @@ func (m *MainUIModel) HandleOverlayKey(msg tea.KeyMsg) bool {
 			}
 			m.overlay.Close()
 			if chosen.ID != "" {
-				m.applyModelSelection(chosen)
+				m.applyModelSelection(chosen, persist)
 			}
 		default:
 			if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {

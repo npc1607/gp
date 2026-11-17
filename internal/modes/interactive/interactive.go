@@ -334,7 +334,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 	}
 
 	uiModel.SetAuthStore(authStore)
-	uiModel.SetModelChangeHandler(func(entry auth.ModelEntry) error {
+	uiModel.SetModelChangeHandler(func(entry auth.ModelEntry, persist bool) error {
 		newKey, newURL, _, ok := authStore.ResolveCredential(entry.Provider)
 		if !ok {
 			if apiKey != "" && (entry.BaseURL == "" || entry.BaseURL == baseURL) {
@@ -355,6 +355,24 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			ag.SetProvider(p)
 		} else if newKey != "" || newURL != "" {
 			ag.SetProvider(openai.NewProvider(newKey, newURL))
+		}
+		if persist {
+			mgr := r.opts.SettingsMgr
+			if mgr == nil {
+				mgr = settings.NewManager(cwd)
+			}
+			var globalCfg settings.Settings
+			if loaded, err := mgr.Load(); err == nil && loaded != nil {
+				globalCfg = loaded.Clone()
+			} else if cfg != nil {
+				globalCfg = cfg.Clone()
+			} else {
+				globalCfg = settings.DefaultSettings()
+			}
+			globalCfg.Model = entry.ID
+			if err := mgr.SaveGlobal(globalCfg); err != nil {
+				return fmt.Errorf("save default model: %w", err)
+			}
 		}
 		return nil
 	})

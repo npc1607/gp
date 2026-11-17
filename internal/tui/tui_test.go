@@ -802,13 +802,15 @@ func TestTUI_LoginLogoutAndModelSelector(t *testing.T) {
 		t.Fatalf("expected qoder key saved in auth.db, got (%q, %v)", k, ok)
 	}
 
-	// 2. /model -> opens Model Selector showing authenticated qoder models
+	// 2. /models -> opens Model Selector showing authenticated qoder models
 	var switchedTo auth.ModelEntry
-	m.SetModelChangeHandler(func(entry auth.ModelEntry) error {
+	var persisted bool
+	m.SetModelChangeHandler(func(entry auth.ModelEntry, persist bool) error {
 		switchedTo = entry
+		persisted = persist
 		return nil
 	})
-	m.inputArea.SetValue("/model")
+	m.inputArea.SetValue("/models")
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.overlay.Kind != OverlayModelSelect {
 		t.Fatalf("expected OverlayModelSelect, got %v", m.overlay.Kind)
@@ -817,9 +819,10 @@ func TestTUI_LoginLogoutAndModelSelector(t *testing.T) {
 	if !strings.Contains(ovView, "Select Model") || !strings.Contains(ovView, "qoder/auto") {
 		t.Fatalf("expected Select Model overlay with qoder/auto, got:\n%s", ovView)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if switchedTo.FullName != "qoder/auto" || m.header.ModelName != "auto" {
-		t.Fatalf("expected model switched to qoder/auto, got %+v / %q", switchedTo, m.header.ModelName)
+	// Ctrl+S saves as default model
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if switchedTo.FullName != "qoder/auto" || m.header.ModelName != "auto" || !persisted {
+		t.Fatalf("expected model saved as default qoder/auto, got %+v / %q / persisted=%v", switchedTo, m.header.ModelName, persisted)
 	}
 
 	// 3. /logout qoder -> removes credential
@@ -837,7 +840,7 @@ func TestTUI_SlashCommandCompletion(t *testing.T) {
 	// Typing "/" shows completion menu
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
 	view := m.View()
-	if !strings.Contains(view, "/model") || !strings.Contains(view, "/login") || !strings.Contains(view, "/zentui") {
+	if !strings.Contains(view, "/models") || !strings.Contains(view, "/login") || !strings.Contains(view, "/zentui") {
 		t.Fatalf("expected slash command completion menu in view, got:\n%s", view)
 	}
 

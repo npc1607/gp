@@ -53,7 +53,7 @@ type MainUIModel struct {
 	tickCount     int
 	compCursor    int
 	onUserSubmit  func(prompt string)
-	onModelChange func(entry auth.ModelEntry) error
+	onModelChange func(entry auth.ModelEntry, persist bool) error
 	onAuthChange  func(providerID string)
 	fpsTicker     time.Duration
 }
@@ -62,6 +62,8 @@ type MainUIModel struct {
 func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIModel {
 	ti := textinput.New()
 	ti.Prompt = ""
+	ti.Placeholder = "Type a message, /model, /login, or Ctrl+O to toggle folds..."
+	ti.CharLimit = 0
 	ti.Focus()
 
 	defaultWidth := 100
@@ -227,8 +229,8 @@ func (m *MainUIModel) SetAuthStore(s *auth.Store) {
 	}
 }
 
-// SetModelChangeHandler 注册 /model 切换模型时的运行时回调
-func (m *MainUIModel) SetModelChangeHandler(fn func(entry auth.ModelEntry) error) {
+// SetModelChangeHandler 注册 /models 切换模型与 Ctrl+S 保存默认模型时的运行时回调
+func (m *MainUIModel) SetModelChangeHandler(fn func(entry auth.ModelEntry, persist bool) error) {
 	m.onModelChange = fn
 }
 
@@ -379,6 +381,24 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "ctrl+s":
+			if m.header.ModelName != "" {
+				prov := m.header.ProviderName
+				if prov == "" {
+					prov = auth.InferProviderFromModel(m.header.ModelName)
+				}
+				full := m.header.ModelName
+				if prov != "" && !strings.Contains(full, "/") {
+					full = prov + "/" + full
+				}
+				m.applyModelSelection(auth.ModelEntry{
+					Provider: prov,
+					ID:       m.header.ModelName,
+					FullName: full,
+					BaseURL:  m.header.BaseURL,
+				}, true)
+			}
+			return m, nil
 		case "ctrl+o":
 			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 				activeBuf.Transcript.ToggleAllExpanded()
@@ -457,7 +477,9 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.working.Advance()
 			m.syncActiveBuffer(false)
 		} else if buf, ok := m.agentBuffers[m.activeTabID]; ok && buf.Dirty {
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+			autoScroll := buf.AutoScroll
+			buf.AutoScroll = false
+			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), autoScroll)
 		}
 		if m.tickCount%90 == 0 && m.footer != nil {
 			m.footer.RefreshGit()
@@ -481,7 +503,13 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			buf := m.EnsureAgentBuffer(specMsg.AgentID, "")
 			buf.RawTextBuffer += specMsg.DeltaText
 			buf.Transcript.AppendTextDelta(specMsg.DeltaText, m.config)
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+			if buf.LastSync.IsZero() || time.Since(buf.LastSync) >= 33*time.Millisecond {
+				buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+				buf.LastSync = time.Now()
+			} else {
+				buf.Dirty = true
+				buf.AutoScroll = true
+			}
 			return m, tea.Batch(cmds...)
 
 		case AgentThinkingDeltaMsg:
@@ -718,7 +746,7 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		m.overlay.LoggedInIDs = ids
 		return true
 
-	case "/model", "/models":
+	case "/models":
 		if len(fields) == 2 && strings.ToLower(fields[1]) == "refresh" {
 			go func() {
 				for _, p := range auth.RegisteredProviders() {
@@ -732,7 +760,7 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		query := ""
 		if len(fields) >= 2 {
 			query = strings.Join(fields[1:], " ")
-			// 若精确匹配某一个模型，直接切换（对齐 Pi /model <exact>）
+			// 若精确匹配某一个模型，直接切换
 			var exactMatches []auth.ModelEntry
 			qNorm := strings.ToLower(strings.TrimSpace(query))
 			for _, me := range models {
@@ -741,7 +769,7 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 				}
 			}
 			if len(exactMatches) == 1 {
-				m.applyModelSelection(exactMatches[0])
+				m.applyModelSelection(exactMatches[0], false)
 				return true
 			}
 		}
@@ -869,9 +897,9 @@ func (m *MainUIModel) applyLogout(providerID string) {
 	m.addSystemNotice(fmt.Sprintf("✓ Logged out of %s", providerID), false)
 }
 
-func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry) {
+func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry, persist bool) {
 	if m.onModelChange != nil {
-		if err := m.onModelChange(entry); err != nil {
+		if err := m.onModelChange(entry, persist); err != nil {
 			m.addSystemNotice(fmt.Sprintf("Switch model failed: %v", err), true)
 			return
 		}
@@ -886,7 +914,11 @@ func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry) {
 	for _, buf := range m.agentBuffers {
 		buf.SetModelInfo(m.header.ModelName, m.header.ProviderName)
 	}
-	m.addSystemNotice(fmt.Sprintf("✓ Model: %s", entry.FullName), false)
+	if persist {
+		m.addSystemNotice(fmt.Sprintf("✓ Default model saved: %s (used on next startup)", entry.FullName), false)
+	} else {
+		m.addSystemNotice(fmt.Sprintf("✓ Model: %s", entry.FullName), false)
+	}
 }
 
 func (m *MainUIModel) renderTabBar() string {
