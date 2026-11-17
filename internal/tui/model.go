@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"gp/internal/ai"
 	"gp/internal/core/auth"
+	"gp/internal/core/storage"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -52,10 +54,12 @@ type MainUIModel struct {
 	showDAG       bool
 	tickCount     int
 	compCursor    int
-	onUserSubmit  func(prompt string)
-	onModelChange func(entry auth.ModelEntry, persist bool) error
-	onAuthChange  func(providerID string)
-	fpsTicker     time.Duration
+	onUserSubmit    func(prompt string)
+	onModelChange   func(entry auth.ModelEntry, persist bool) error
+	onAuthChange    func(providerID string)
+	onListSessions  func() ([]storage.SessionSummary, error)
+	onResumeSession func(sessionID string) ([]ai.Message, error)
+	fpsTicker       time.Duration
 }
 
 // NewMainUIModel 创建全局终端界面主模型
@@ -237,6 +241,15 @@ func (m *MainUIModel) SetModelChangeHandler(fn func(entry auth.ModelEntry, persi
 // SetAuthChangeHandler 注册 /login 或 /logout 变更凭证时的回调
 func (m *MainUIModel) SetAuthChangeHandler(fn func(providerID string)) {
 	m.onAuthChange = fn
+}
+
+// SetSessionHandlers 注册 /resume 列举与恢复历史会话的运行时回调
+func (m *MainUIModel) SetSessionHandlers(
+	listFn func() ([]storage.SessionSummary, error),
+	resumeFn func(sessionID string) ([]ai.Message, error),
+) {
+	m.onListSessions = listFn
+	m.onResumeSession = resumeFn
 }
 
 func (m *MainUIModel) activeTabIndex() int {
@@ -704,6 +717,32 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		return false
 	}
 	switch fields[0] {
+	case "/resume":
+		if m.onListSessions == nil || m.onResumeSession == nil {
+			m.addSystemNotice("Session storage is not enabled in this mode", true)
+			return true
+		}
+		sessions, err := m.onListSessions()
+		if err != nil {
+			m.addSystemNotice(fmt.Sprintf("List sessions failed: %v", err), true)
+			return true
+		}
+		query := ""
+		if len(fields) >= 2 {
+			query = strings.Join(fields[1:], " ")
+			for _, s := range sessions {
+				if s.SessionID == query {
+					m.applyResumeSession(s.SessionID)
+					return true
+				}
+			}
+		}
+		m.overlay.Kind = OverlayResumeSelect
+		m.overlay.Cursor = 0
+		m.overlay.SearchQuery = query
+		m.overlay.Sessions = sessions
+		return true
+
 	case "/login":
 		if len(fields) >= 3 {
 			target := auth.NormalizeProviderID(fields[1])
@@ -919,6 +958,60 @@ func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry, persist bool) {
 	} else {
 		m.addSystemNotice(fmt.Sprintf("✓ Model: %s", entry.FullName), false)
 	}
+}
+
+func (m *MainUIModel) applyResumeSession(sessionID string) {
+	if m.onResumeSession == nil {
+		return
+	}
+	msgs, err := m.onResumeSession(sessionID)
+	if err != nil {
+		m.addSystemNotice(fmt.Sprintf("Resume %s failed: %v", sessionID, err), true)
+		return
+	}
+	m.header.SessionID = sessionID
+	m.activeTabID = PrimaryAgentID
+	m.tabIDs = []string{PrimaryAgentID}
+
+	buf := m.EnsureAgentBuffer(PrimaryAgentID, "Orchestrator")
+	buf.RawTextBuffer = ""
+	buf.Transcript = NewTranscript(m.header.ModelName, m.header.ProviderName)
+
+	var activeTurn *TurnItem
+	for _, msg := range msgs {
+		switch msg.Role {
+		case ai.RoleUser:
+			if activeTurn != nil {
+				buf.Transcript.FinishTurn("completed", m.config)
+				activeTurn = nil
+			}
+			buf.Transcript.AddUserMessage(msg.Content, msg.Timestamp)
+		case ai.RoleAssistant:
+			if activeTurn == nil {
+				activeTurn = buf.Transcript.StartTurn(m.config)
+			}
+			if msg.Thinking != "" {
+				buf.Transcript.AppendThinkingDelta(msg.Thinking, m.config)
+			}
+			if msg.Content != "" {
+				buf.Transcript.AppendTextDelta(msg.Content, m.config)
+			}
+			for _, tc := range msg.ToolCalls {
+				buf.Transcript.StartToolCall(tc.ID, tc.Function.Name, string(tc.Function.Arguments), m.config)
+			}
+			if len(msg.ToolCalls) == 0 {
+				buf.Transcript.FinishTurn("completed", m.config)
+				activeTurn = nil
+			}
+		case ai.RoleTool:
+			buf.Transcript.FinishToolCall(msg.ToolCallID, "", "", msg.Content, false, 0)
+		}
+	}
+	if activeTurn != nil {
+		buf.Transcript.FinishTurn("completed", m.config)
+	}
+	buf.Transcript.AddNotice(fmt.Sprintf("✓ Resumed conversation %s (%d messages)", sessionID, len(msgs)))
+	buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
 }
 
 func (m *MainUIModel) renderTabBar() string {

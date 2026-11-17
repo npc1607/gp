@@ -334,6 +334,24 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 	}
 
 	uiModel.SetAuthStore(authStore)
+	if store != nil {
+		uiModel.SetSessionHandlers(
+			func() ([]storage.SessionSummary, error) {
+				if lister, ok := store.(storage.SessionLister); ok {
+					return lister.ListSessions(50)
+				}
+				return nil, fmt.Errorf("current storage backend does not support listing sessions")
+			},
+			func(sessionID string) ([]ai.Message, error) {
+				st, err := session.NewSessionTree(sessionID, store)
+				if err != nil {
+					return nil, err
+				}
+				ag.SetSessionTree(st)
+				return st.GetLinearContext(), nil
+			},
+		)
+	}
 	uiModel.SetModelChangeHandler(func(entry auth.ModelEntry, persist bool) error {
 		newKey, newURL, _, ok := authStore.ResolveCredential(entry.Provider)
 		if !ok {

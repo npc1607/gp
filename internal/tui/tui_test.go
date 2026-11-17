@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"gp/internal/ai"
 	"gp/internal/core/auth"
+	"gp/internal/core/storage"
 	_ "gp/internal/ai/providers/openai"
 	_ "gp/plugins/qoder"
 
@@ -909,5 +911,46 @@ func TestTUI_AskUserQuestionDialog(t *testing.T) {
 	}
 	if res.Answers[0].Answer != "JWT" || len(res.Answers[1].Selected) != 1 || res.Answers[1].Selected[0] != "Metrics" {
 		t.Fatalf("unexpected answers: %+v", res.Answers)
+	}
+}
+
+func TestTUI_ResumeCommandAndOverlay(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 35})
+
+	var resumedID string
+	m.SetSessionHandlers(
+		func() ([]storage.SessionSummary, error) {
+			return []storage.SessionSummary{
+				{SessionID: "sess_1001", MessageCount: 4, FirstPrompt: "build http cache", UpdatedAt: time.Now()},
+				{SessionID: "sess_1002", MessageCount: 2, FirstPrompt: "fix login bug", UpdatedAt: time.Now().Add(-time.Hour)},
+			}, nil
+		},
+		func(sessionID string) ([]ai.Message, error) {
+			resumedID = sessionID
+			return []ai.Message{
+				ai.NewUserMessage("build http cache"),
+				ai.NewAssistantMessage("Here is the cache middleware plan.", ""),
+			}, nil
+		},
+	)
+
+	m.inputArea.SetValue("/resume")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.overlay.Kind != OverlayResumeSelect {
+		t.Fatalf("expected OverlayResumeSelect, got %v", m.overlay.Kind)
+	}
+	view := m.View()
+	if !strings.Contains(view, "Resume Conversation") || !strings.Contains(view, "sess_1001") || !strings.Contains(view, "build http cache") {
+		t.Fatalf("expected Resume Conversation overlay with sess_1001, got:\n%s", view)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if resumedID != "sess_1001" || m.header.SessionID != "sess_1001" {
+		t.Fatalf("expected resumed sess_1001, got %q / %q", resumedID, m.header.SessionID)
+	}
+	resumedView := m.View()
+	if !strings.Contains(resumedView, "build http cache") || !strings.Contains(resumedView, "Here is the cache middleware plan.") {
+		t.Fatalf("expected restored conversation rendered in transcript, got:\n%s", resumedView)
 	}
 }

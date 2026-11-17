@@ -15,6 +15,7 @@ type SlashCommand struct {
 // BuiltinSlashCommands 当前 TUI 支持的全部斜杠指令目录
 var BuiltinSlashCommands = []SlashCommand{
 	{Name: "/models", Usage: "/models [query|refresh]", Description: "选择、切换或设为默认启动模型（Ctrl+S 保存默认）"},
+	{Name: "/resume", Usage: "/resume [session_id|search]", Description: "浏览并恢复历史会话 (Browse and resume past conversations)"},
 	{Name: "/login", Usage: "/login [qoder|deepseek]", Description: "登录并保存 Provider 凭证到 ~/.gp/auth.db"},
 	{Name: "/logout", Usage: "/logout [provider]", Description: "注销并清除已保存的 Provider 凭证"},
 	{Name: "/zentui", Usage: "/zentui preset opencode|rail|minimalist", Description: "实时切换编辑器、用户消息与状态栏样式预设"},

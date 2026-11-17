@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"gp/internal/core/auth"
+	"gp/internal/core/storage"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,6 +20,7 @@ const (
 	OverlayLoginSelect
 	OverlayLoginKey
 	OverlayLogoutSelect
+	OverlayResumeSelect
 )
 
 // OverlayState 管理 /model、/login、/logout 的交互式选择与输入状态
@@ -32,6 +34,7 @@ type OverlayState struct {
 	Models      []auth.ModelEntry
 	Providers   []auth.ProviderSpec
 	LoggedInIDs []string
+	Sessions    []storage.SessionSummary
 	StatusNote  string
 }
 
@@ -69,6 +72,21 @@ func (o *OverlayState) filteredModels() []auth.ModelEntry {
 			strings.Contains(strings.ToLower(m.ID), q) ||
 			strings.Contains(strings.ToLower(m.Provider), q) {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func (o *OverlayState) filteredSessions() []storage.SessionSummary {
+	q := strings.ToLower(strings.TrimSpace(o.SearchQuery))
+	if q == "" {
+		return o.Sessions
+	}
+	var out []storage.SessionSummary
+	for _, s := range o.Sessions {
+		if strings.Contains(strings.ToLower(s.SessionID), q) ||
+			strings.Contains(strings.ToLower(s.FirstPrompt), q) {
+			out = append(out, s)
 		}
 	}
 	return out
@@ -201,6 +219,50 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 		}
 		lines = append(lines, "")
 		lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Enter logout · Esc cancel"))
+
+	case OverlayResumeSelect:
+		title = t.BoldFg(t.Accent, "Resume Conversation")
+		searchRow := t.Fg(t.Muted, "Search: ") + t.Fg(t.Text, o.SearchQuery) + t.BoldFg(t.Accent, "▌")
+		lines = append(lines, ClipToWidth(searchRow, innerW, "…"))
+		lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
+
+		filtered := o.filteredSessions()
+		if len(filtered) == 0 {
+			lines = append(lines, t.Fg(t.Muted, "  (no past conversations found)"))
+		} else {
+			maxShow := 8
+			start := 0
+			if o.Cursor >= maxShow {
+				start = o.Cursor - maxShow + 1
+			}
+			end := start + maxShow
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+			for i := start; i < end; i++ {
+				s := filtered[i]
+				sel := "  "
+				if i == o.Cursor {
+					sel = t.BoldFg(t.Accent, "› ")
+				}
+				prompt := s.FirstPrompt
+				if prompt == "" {
+					prompt = "(empty conversation)"
+				}
+				ts := ""
+				if !s.UpdatedAt.IsZero() {
+					ts = FormatMessageTime(s.UpdatedAt)
+				}
+				right := t.Fg(t.Muted, fmt.Sprintf("%d msgs · %s", s.MessageCount, ts))
+				left := sel + t.Fg(t.Text, s.SessionID+" ") + t.Fg(t.Muted, prompt)
+				if i == o.Cursor {
+					left = sel + t.BoldFg(t.Accent, s.SessionID+" ") + t.Fg(t.Text, prompt)
+				}
+				lines = append(lines, composeLeftRight(left, right, innerW))
+			}
+		}
+		lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
+		lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Enter resume · Esc cancel · type to filter"))
 	}
 
 	padded := make([]string, len(lines))
@@ -323,6 +385,37 @@ func (m *MainUIModel) HandleOverlayKey(msg tea.KeyMsg) bool {
 				id := m.overlay.LoggedInIDs[m.overlay.Cursor]
 				m.overlay.Close()
 				m.applyLogout(id)
+			}
+		}
+		return true
+
+	case OverlayResumeSelect:
+		filtered := m.overlay.filteredSessions()
+		switch key {
+		case "up":
+			if m.overlay.Cursor > 0 {
+				m.overlay.Cursor--
+			}
+		case "down":
+			if m.overlay.Cursor < len(filtered)-1 {
+				m.overlay.Cursor++
+			}
+		case "backspace":
+			rs := []rune(m.overlay.SearchQuery)
+			if len(rs) > 0 {
+				m.overlay.SearchQuery = string(rs[:len(rs)-1])
+				m.overlay.Cursor = 0
+			}
+		case "enter":
+			if len(filtered) > 0 && m.overlay.Cursor >= 0 && m.overlay.Cursor < len(filtered) {
+				chosen := filtered[m.overlay.Cursor]
+				m.overlay.Close()
+				m.applyResumeSession(chosen.SessionID)
+			}
+		default:
+			if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+				m.overlay.SearchQuery += string(msg.Runes)
+				m.overlay.Cursor = 0
 			}
 		}
 		return true
