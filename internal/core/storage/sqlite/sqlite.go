@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -284,6 +285,70 @@ func (s *SqliteStorage) ListCheckpoints(sessionID string) ([]*storage.TaskCheckp
 		res = append(res, &cp)
 	}
 	return res, rows.Err()
+}
+
+// ListSessions 按最近更新时间倒序列出历史会话摘要
+func (s *SqliteStorage) ListSessions(limit int) ([]storage.SessionSummary, error) {
+	if s.isClosed() {
+		return nil, fmt.Errorf("storage closed")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(
+		`SELECT session_id, COUNT(*), MAX(created_at) FROM entries GROUP BY session_id ORDER BY MAX(created_at) DESC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions failed: %w", err)
+	}
+	defer rows.Close()
+
+	var out []storage.SessionSummary
+	for rows.Next() {
+		var (
+			sum     storage.SessionSummary
+			maxTime string
+		)
+		if err := rows.Scan(&sum.SessionID, &sum.MessageCount, &maxTime); err != nil {
+			return nil, fmt.Errorf("scan session summary failed: %w", err)
+		}
+		if t, err := time.Parse(time.RFC3339Nano, maxTime); err == nil {
+			sum.UpdatedAt = t
+		}
+		out = append(out, sum)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for i := range out {
+		eRows, err := s.db.Query(
+			`SELECT payload FROM entries WHERE session_id = ? AND entry_type = 'message' ORDER BY created_at ASC LIMIT 10`,
+			out[i].SessionID,
+		)
+		if err != nil {
+			continue
+		}
+		for eRows.Next() {
+			var payload []byte
+			if eRows.Scan(&payload) != nil {
+				continue
+			}
+			var se struct {
+				Message *struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(payload, &se) == nil && se.Message != nil && se.Message.Role == "user" && strings.TrimSpace(se.Message.Content) != "" {
+				out[i].FirstPrompt = strings.Join(strings.Fields(se.Message.Content), " ")
+				break
+			}
+		}
+		_ = eRows.Close()
+	}
+	return out, nil
 }
 
 // sqliteTx SQLite 事务封装

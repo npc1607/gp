@@ -34,6 +34,19 @@ type TaskCheckpoint struct {
 	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
+// SessionSummary 历史会话摘要，用于 /resume 浏览与恢复
+type SessionSummary struct {
+	SessionID    string    `json:"session_id"`
+	MessageCount int       `json:"message_count"`
+	FirstPrompt  string    `json:"first_prompt"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// SessionLister 可选历史会话列举接口
+type SessionLister interface {
+	ListSessions(limit int) ([]SessionSummary, error)
+}
+
 // Storage 存储抽象接口
 type Storage interface {
 	Commit(ctx context.Context, fn func(tx Transaction) error) error
