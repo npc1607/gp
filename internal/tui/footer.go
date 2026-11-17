@@ -7,11 +7,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // FooterState 保存 Starship 风格底部状态栏所需的真实上下文信息
 type FooterState struct {
+	mu            sync.RWMutex
+	refreshing    atomic.Bool
 	Cwd           string
 	GitBranch     string
 	GitDirty      bool
@@ -41,27 +45,36 @@ func NewFooterState(cwd string) *FooterState {
 	return fs
 }
 
-// RefreshGit 刷新当前目录的 Git 分支与工作区脏状态（带 3 秒节流保护）
+// RefreshGit 异步刷新当前目录的 Git 分支与工作区脏状态（带 3 秒节流，绝不阻塞 UI 线程）
 func (f *FooterState) RefreshGit() {
-	if !f.LastGitCheck.IsZero() && time.Since(f.LastGitCheck) < 3*time.Second {
+	f.mu.RLock()
+	last := f.LastGitCheck
+	cwd := f.Cwd
+	f.mu.RUnlock()
+
+	if !last.IsZero() && time.Since(last) < 3*time.Second {
 		return
 	}
-	f.LastGitCheck = time.Now()
-	if f.Cwd == "" {
+	if cwd == "" || !f.refreshing.CompareAndSwap(false, true) {
 		return
 	}
-	cmd := exec.Command("git", "-C", f.Cwd, "rev-parse", "--abbrev-ref", "HEAD")
-	if out, err := cmd.Output(); err == nil {
-		f.GitBranch = strings.TrimSpace(string(out))
-	} else {
-		f.GitBranch = ""
-		f.GitDirty = false
-		return
-	}
-	stCmd := exec.Command("git", "-C", f.Cwd, "status", "--porcelain", "-uno")
-	if out, err := stCmd.Output(); err == nil {
-		f.GitDirty = len(strings.TrimSpace(string(out))) > 0
-	}
+
+	go func() {
+		defer f.refreshing.Store(false)
+		branch := ""
+		dirty := false
+		if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+			branch = strings.TrimSpace(string(out))
+			if stOut, stErr := exec.Command("git", "-C", cwd, "status", "--porcelain", "-uno").Output(); stErr == nil {
+				dirty = len(strings.TrimSpace(string(stOut))) > 0
+			}
+		}
+		f.mu.Lock()
+		f.GitBranch = branch
+		f.GitDirty = dirty
+		f.LastGitCheck = time.Now()
+		f.mu.Unlock()
+	}()
 }
 
 // Render 渲染 pi-zentui Starship 风格底部状态栏
@@ -81,13 +94,18 @@ func (f *FooterState) Render(width int, t Theme, cfg UIConfig) string {
 	var leftParts []string
 	leftParts = append(leftParts, t.BoldFg(t.Accent, dirName))
 
-	if f.GitBranch != "" {
+	f.mu.RLock()
+	gitBranch := f.GitBranch
+	gitDirty := f.GitDirty
+	f.mu.RUnlock()
+
+	if gitBranch != "" {
 		branchGlyph := "git:"
 		if cfg.Icons {
 			branchGlyph = " "
 		}
-		branchPart := t.Fg(t.Muted, "on ") + t.BoldFg(t.SyntaxKeyword, branchGlyph+f.GitBranch)
-		if f.GitDirty {
+		branchPart := t.Fg(t.Muted, "on ") + t.BoldFg(t.SyntaxKeyword, branchGlyph+gitBranch)
+		if gitDirty {
 			branchPart += t.BoldFg(t.Warning, " *")
 		}
 		leftParts = append(leftParts, branchPart)

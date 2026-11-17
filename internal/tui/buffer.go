@@ -18,6 +18,8 @@ type AgentViewBuffer struct {
 	StartTime     time.Time
 	ElapsedTime   time.Duration
 	Dirty         bool
+	AutoScroll    bool
+	LastSync      time.Time
 }
 
 // NewAgentViewBuffer 创建指定尺寸的 Agent 专属视口与结构化缓冲区

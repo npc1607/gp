@@ -104,17 +104,12 @@ func RenderEditor(
 	}
 	botBorder := t.Fg(t.BorderMuted, strings.Repeat("─", width))
 
-	// 输入行内容（空输入时显示 placeholder + 光标）
-	var inputLine string
-	val := input.Value()
-	if val == "" {
-		cursor := t.BoldFg(t.Text, "▌")
-		ph := t.Fg(t.Dim, "Type a message, /zentui, /tidy, or Ctrl+O to toggle folds...")
-		inputLine = cursor + " " + ClipToWidth(ph, innerW-2, "…")
-	} else {
-		// 使用 textinput 的 View 或直接拼接光标以保持纯正透明背景
-		inputLine = t.Fg(t.Text, ClipToWidth(val, innerW-2, "…")) + t.BoldFg(t.Text, "▌")
+	// 输入行内容（直接使用 textinput.View()，完整支持左右移动光标、Ctrl+W/Alt+Backspace 删词及长文本水平滚动）
+	input.Width = innerW - 2
+	if input.Width < 8 {
+		input.Width = 8
 	}
+	inputLine := ClipToWidth(input.View(), innerW, "")
 
 	// 元数据行: <provider-icon> <model>  <thinking>        <rightHint>
 	pIcon := ProviderIcon(meta.ProviderName, meta.ModelName, cfg.Icons)
