@@ -22,6 +22,11 @@ func RegisterAll(r *tools.Registry) error {
 			return fmt.Errorf("register builtin tool %q: %w", t.Name(), err)
 		}
 	}
+	for _, pt := range tools.ListPluginTools() {
+		if err := r.Register(pt); err != nil {
+			return fmt.Errorf("register plugin tool %q: %w", pt.Name(), err)
+		}
+	}
 	return nil
 }
 

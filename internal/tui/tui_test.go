@@ -3,9 +3,14 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gp/internal/core/auth"
+	_ "gp/internal/ai/providers/openai"
+	_ "gp/plugins/qoder"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -774,5 +779,132 @@ func TestTUI_SubagentDataFlowAndTabs(t *testing.T) {
 	}
 	if !strings.Contains(view, "2:pro1") {
 		t.Fatalf("expected subagent tab 2:pro1 in tab bar, got:\n%s", view)
+	}
+}
+
+func TestTUI_LoginLogoutAndModelSelector(t *testing.T) {
+	tmp := t.TempDir()
+	store := auth.NewStoreWithPath(filepath.Join(tmp, "auth.json"))
+	m := createTestMainUIModel(t, nil)
+	m.SetAuthStore(store)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 35})
+
+	// 1. /login qoder -> prompts for key -> Enter saves to auth.db
+	m.inputArea.SetValue("/login qoder")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.overlay.Kind != OverlayLoginKey || m.overlay.TargetProv != "qoder" {
+		t.Fatalf("expected OverlayLoginKey for qoder, got %+v", m.overlay)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("pt-secret-key")})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if k, _, _, ok := store.ResolveCredential("qoder"); !ok || k != "pt-secret-key" {
+		t.Fatalf("expected qoder key saved in auth.db, got (%q, %v)", k, ok)
+	}
+
+	// 2. /model -> opens Model Selector showing authenticated qoder models
+	var switchedTo auth.ModelEntry
+	m.SetModelChangeHandler(func(entry auth.ModelEntry) error {
+		switchedTo = entry
+		return nil
+	})
+	m.inputArea.SetValue("/model")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.overlay.Kind != OverlayModelSelect {
+		t.Fatalf("expected OverlayModelSelect, got %v", m.overlay.Kind)
+	}
+	ovView := m.View()
+	if !strings.Contains(ovView, "Select Model") || !strings.Contains(ovView, "qoder/auto") {
+		t.Fatalf("expected Select Model overlay with qoder/auto, got:\n%s", ovView)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if switchedTo.FullName != "qoder/auto" || m.header.ModelName != "auto" {
+		t.Fatalf("expected model switched to qoder/auto, got %+v / %q", switchedTo, m.header.ModelName)
+	}
+
+	// 3. /logout qoder -> removes credential
+	m.inputArea.SetValue("/logout qoder")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, _, _, ok := store.ResolveCredential("qoder"); ok {
+		t.Fatalf("expected qoder credential removed after /logout")
+	}
+}
+
+func TestTUI_SlashCommandCompletion(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 35})
+
+	// Typing "/" shows completion menu
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	view := m.View()
+	if !strings.Contains(view, "/model") || !strings.Contains(view, "/login") || !strings.Contains(view, "/zentui") {
+		t.Fatalf("expected slash command completion menu in view, got:\n%s", view)
+	}
+
+	// Typing "lo" filters to /login and /logout
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("lo")})
+	view2 := m.View()
+	if !strings.Contains(view2, "/login") || !strings.Contains(view2, "/logout") || strings.Contains(view2, "/zentui") {
+		t.Fatalf("expected filtered slash commands (/login, /logout), got:\n%s", view2)
+	}
+
+	// Down selects /logout, Tab completes "/logout "
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.InputArea().Value(); got != "/logout " {
+		t.Fatalf("expected Tab to complete '/logout ', got %q", got)
+	}
+}
+
+func TestTUI_AskUserQuestionDialog(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 110, Height: 40})
+
+	respCh := make(chan AskUserResult, 1)
+	_, _ = m.Update(AskUserQuestionMsg{
+		ResponseCh: respCh,
+		Questions: []AskUserQuestion{
+			{
+				Question: "Which auth method?",
+				Header:   "Auth",
+				Options: []AskUserOption{
+					{Label: "JWT", Description: "Stateless token", Preview: "Authorization: Bearer ..."},
+					{Label: "Session", Description: "Cookie store"},
+				},
+			},
+			{
+				Question:    "Which extras?",
+				Header:      "Extras",
+				MultiSelect: true,
+				Options: []AskUserOption{
+					{Label: "Metrics", Description: "Prometheus"},
+					{Label: "Tracing", Description: "OpenTelemetry"},
+				},
+			},
+		},
+	})
+
+	view := m.View()
+	if !strings.Contains(view, "ask_user_question") || !strings.Contains(view, "Which auth method?") || !strings.Contains(view, "preview") {
+		t.Fatalf("expected ask_user_question dialog with preview in view, got:\n%s", view)
+	}
+
+	// Pick option 1 ("JWT") -> advances to tab 1 ("Extras")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// Check option 0 ("Metrics") in multi-select, then navigate to Next and press Enter -> Submit tab
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// Submit tab: Enter submits
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	res := <-respCh
+	if res.Cancelled || len(res.Answers) != 2 {
+		t.Fatalf("expected 2 non-cancelled answers, got %+v", res)
+	}
+	if res.Answers[0].Answer != "JWT" || len(res.Answers[1].Selected) != 1 || res.Answers[1].Selected[0] != "Metrics" {
+		t.Fatalf("unexpected answers: %+v", res.Answers)
 	}
 }
