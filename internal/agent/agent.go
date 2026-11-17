@@ -98,8 +98,31 @@ func (a *AgentInstance) SessionID() string {
 	}
 	return a.id
 }
-func (a *AgentInstance) RoleName() string                     { return a.roleName }
-func (a *AgentInstance) ModelName() string                    { return a.modelName }
+func (a *AgentInstance) RoleName() string { return a.roleName }
+func (a *AgentInstance) ModelName() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.modelName
+}
+func (a *AgentInstance) SetModelName(m string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if m != "" {
+		a.modelName = m
+	}
+}
+func (a *AgentInstance) GetProvider() ai.Provider {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.provider
+}
+func (a *AgentInstance) SetProvider(p ai.Provider) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if p != nil {
+		a.provider = p
+	}
+}
 func (a *AgentInstance) GetSessionTree() *session.SessionTree { return a.sessionTree }
 func (a *AgentInstance) GetRegistry() *tools.Registry         { return a.toolReg }
 

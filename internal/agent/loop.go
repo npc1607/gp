@@ -154,12 +154,12 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		a.SetStatus(StatusStreaming)
 
 		req := &ai.ChatRequest{
-			Model:    a.modelName,
+			Model:    a.ModelName(),
 			Messages: messages,
 			Tools:    toolDefs,
 		}
 
-		chunkChan, err := a.provider.StreamChat(ctx, req)
+		chunkChan, err := a.GetProvider().StreamChat(ctx, req)
 		if err != nil {
 			a.SetStatus(StatusSettled)
 			if taskTree != nil {
