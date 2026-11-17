@@ -11,6 +11,7 @@ import (
 	"gp/internal/agent"
 	"gp/internal/ai"
 	"gp/internal/ai/providers/openai"
+	"gp/internal/core/auth"
 	"gp/internal/core/resources"
 	"gp/internal/core/session"
 	"gp/internal/core/settings"
@@ -71,13 +72,33 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 
 	cfg := r.resolveSettings(cwd)
 
+	homeDir, _ := os.UserHomeDir()
+	authStore := auth.NewStore(homeDir)
+	go func() {
+		for _, spec := range auth.RegisteredProviders() {
+			_, _ = authStore.RefreshProviderModels(spec.ID)
+		}
+	}()
+
 	modelName := r.resolveModelName(cfg)
 	baseURL := r.resolveBaseURL(cfg)
 	apiKey := r.resolveAPIKey(cfg)
 
+	if inferredProv := auth.InferProviderFromModel(modelName); inferredProv != "" && apiKey == "" {
+		if k, u, _, ok := authStore.ResolveCredential(inferredProv); ok {
+			apiKey = k
+			if u != "" {
+				baseURL = u
+			}
+		}
+	}
+
 	prov := r.opts.Provider
 	if prov == nil {
-		prov = openai.NewProvider(apiKey, baseURL)
+		prov = ai.CreateProviderFromPlugins("", apiKey, baseURL, modelName)
+		if prov == nil {
+			prov = openai.NewProvider(apiKey, baseURL)
+		}
 	}
 
 	reg, err := r.resolveRegistry(cwd, cfg)
@@ -175,7 +196,6 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 	ag := agent.NewAgent(tui.PrimaryAgentID, "orchestrator", prov, modelName, reg)
 	ag.SetCwd(cwd)
 
-	homeDir, _ := os.UserHomeDir()
 	resLoader := resources.NewResourceLoader(cwd, homeDir)
 	sysPrompt := resLoader.BuildSystemPrompt(cfg.SystemPrompt)
 	if sysPrompt != "" {
@@ -206,6 +226,8 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		SessionID:     sessID,
 		TokenUsage:    "0 tok",
 		Cwd:           cwd,
+		BaseURL:       baseURL,
+		APIKey:        apiKey,
 	}
 
 	ag.SetEventHandler(func(ev agent.AgentEvent) {
@@ -311,7 +333,39 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		return nil
 	}
 
+	uiModel.SetAuthStore(authStore)
+	uiModel.SetModelChangeHandler(func(entry auth.ModelEntry) error {
+		newKey, newURL, _, ok := authStore.ResolveCredential(entry.Provider)
+		if !ok {
+			if apiKey != "" && (entry.BaseURL == "" || entry.BaseURL == baseURL) {
+				newKey = apiKey
+				newURL = baseURL
+			} else if entry.Provider != "" && entry.Provider != "custom" {
+				return fmt.Errorf("未登录 %s，请先执行 /login %s", entry.Provider, entry.Provider)
+			}
+		}
+		if newURL == "" {
+			newURL = entry.BaseURL
+		}
+		if newURL == "" {
+			newURL = baseURL
+		}
+		ag.SetModelName(entry.ID)
+		if p := ai.CreateProviderFromPlugins(entry.Provider, newKey, newURL, entry.ID); p != nil {
+			ag.SetProvider(p)
+		} else if newKey != "" || newURL != "" {
+			ag.SetProvider(openai.NewProvider(newKey, newURL))
+		}
+		return nil
+	})
+
 	p = tea.NewProgram(uiModel, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	tools.SetUIEventSender(func(msg any) {
+		if p != nil {
+			p.Send(msg)
+		}
+	})
+	defer tools.SetUIEventSender(nil)
 
 	if prompt != "" {
 		go func() {

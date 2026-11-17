@@ -14,6 +14,8 @@ import (
 	"gp/internal/modes"
 	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
+	_ "gp/plugins/askuser" // 挂载 rpiv-ask-user-question 插件
+	_ "gp/plugins/qoder"   // 挂载 Qoder Provider 插件
 )
 
 var (

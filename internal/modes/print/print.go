@@ -10,6 +10,7 @@ import (
 	"gp/internal/agent"
 	"gp/internal/ai"
 	"gp/internal/ai/providers/openai"
+	"gp/internal/core/auth"
 	"gp/internal/core/resources"
 	"gp/internal/core/session"
 	"gp/internal/core/settings"
@@ -67,9 +68,20 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 
 	cfg := r.resolveSettings(cwd)
 
+	homeDir, _ := os.UserHomeDir()
+	authStore := auth.NewStore(homeDir)
+
 	modelName := r.resolveModelName(cfg)
 	baseURL := r.resolveBaseURL(cfg)
 	apiKey := r.resolveAPIKey(cfg)
+	if inferred := auth.InferProviderFromModel(modelName); inferred != "" && apiKey == "" {
+		if k, u, _, ok := authStore.ResolveCredential(inferred); ok {
+			apiKey = k
+			if u != "" {
+				baseURL = u
+			}
+		}
+	}
 
 	outWriter := r.opts.Writer
 	if outWriter == nil {
@@ -78,7 +90,10 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 
 	prov := r.opts.Provider
 	if prov == nil {
-		prov = openai.NewProvider(apiKey, baseURL)
+		prov = ai.CreateProviderFromPlugins("", apiKey, baseURL, modelName)
+		if prov == nil {
+			prov = openai.NewProvider(apiKey, baseURL)
+		}
 	}
 
 	reg, err := r.resolveRegistry(cwd, cfg)
@@ -94,7 +109,6 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 	ag := agent.NewAgent("cli-print", "assistant", prov, modelName, reg)
 	ag.SetCwd(cwd)
 
-	homeDir, _ := os.UserHomeDir()
 	resLoader := resources.NewResourceLoader(cwd, homeDir)
 	sysPrompt := resLoader.BuildSystemPrompt(cfg.SystemPrompt)
 	if sysPrompt != "" {
