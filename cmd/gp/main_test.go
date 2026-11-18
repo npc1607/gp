@@ -23,6 +23,21 @@ func buildBinary(t *testing.T) string {
 	return binPath
 }
 
+// isolatedCLICmd 构造一个与本机用户配置隔离的子进程：
+// HOME/USERPROFILE 指向 tmpDir，避免真实 ~/.gp/settings.json（如 "model": "auto"）
+// 与 ~/.gp/mcp.json 影响子进程行为和测试断言；同时清空模型环境变量。
+func isolatedCLICmd(t *testing.T, binPath, tmpDir string, args ...string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(binPath, args...)
+	cmd.Env = append(cmd.Environ(),
+		"HOME="+tmpDir,
+		"USERPROFILE="+tmpDir,
+		"GP_MODEL=",
+		"PI_MODEL=",
+	)
+	return cmd
+}
+
 func TestVersion(t *testing.T) {
 	fn := "cmd/gp.Version"
 	if got := Version; !strings.HasPrefix(got, "v") {
@@ -116,7 +131,7 @@ func TestCLI_TC_CLI_01_ResumeCommandAndFlags(t *testing.T) {
 
 	// 3a. 执行 gp resume -db=<tmpDir>/bin_test.db
 	binDbPath := filepath.Join(tmpDir, "bin_test.db")
-	cmdResumeSub := exec.Command(binPath, "resume", "-db", binDbPath)
+	cmdResumeSub := isolatedCLICmd(t, binPath, tmpDir, "resume", "-db", binDbPath)
 	outSub, err := cmdResumeSub.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: exec %s resume -db %s got error %v, output: %s", fn, binPath, binDbPath, err, string(outSub))
@@ -126,7 +141,7 @@ func TestCLI_TC_CLI_01_ResumeCommandAndFlags(t *testing.T) {
 	}
 
 	// 3b. 执行 gp --resume --db=<tmpDir>/bin_test.db
-	cmdResumeFlag := exec.Command(binPath, "--resume", "--db", binDbPath)
+	cmdResumeFlag := isolatedCLICmd(t, binPath, tmpDir, "--resume", "--db", binDbPath)
 	outFlag, err := cmdResumeFlag.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: exec %s --resume --db %s got error %v, output: %s", fn, binPath, binDbPath, err, string(outFlag))
@@ -161,9 +176,8 @@ func TestCLI_TC_CLI_001_DefaultFlagFallback(t *testing.T) {
 		"args":          []string{},
 	}
 
-	cmd := exec.Command(binPath)
+	cmd := isolatedCLICmd(t, binPath, tmpDir)
 	cmd.Dir = tmpDir
-	cmd.Env = append(cmd.Environ(), "GP_MODEL=", "PI_MODEL=")
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -179,8 +193,7 @@ func TestCLI_TC_CLI_001_DefaultFlagFallback(t *testing.T) {
 func TestCLI_DefaultStartupModel(t *testing.T) {
 	binPath := buildBinary(t)
 
-	cmd := exec.Command(binPath)
-	cmd.Env = append(cmd.Environ(), "GP_MODEL=", "PI_MODEL=")
+	cmd := isolatedCLICmd(t, binPath, t.TempDir())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("exec %s got error %v, output: %s", binPath, err, string(out))
@@ -223,8 +236,7 @@ func TestCLI_TC_TUI_012_NonTTYFallback(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Helper()
-			cmd := exec.Command(binPath, tc.args...)
-			cmd.Env = append(cmd.Environ(), "GP_MODEL=", "PI_MODEL=")
+			cmd := isolatedCLICmd(t, binPath, t.TempDir(), tc.args...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("%s(inputs=%+v): exec got error %v, output: %s", fn, tc.args, err, string(out))

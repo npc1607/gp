@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"gp/internal/ai"
 	"gp/internal/core/auth"
+	"gp/internal/core/compaction"
 	"gp/internal/core/storage"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -65,6 +67,7 @@ type MainUIModel struct {
 	onAuthChange    func(providerID string)
 	onListSessions  func() ([]storage.SessionSummary, error)
 	onResumeSession func(sessionID string) ([]ai.Message, error)
+	onCompact       func(focus string) (int64, int64, error)
 	fpsTicker       time.Duration
 }
 
@@ -103,6 +106,7 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 		fpsTicker:    33 * time.Millisecond,
 	}
 
+	m.footer.ContextWindow = compaction.ResolveContextWindow(header.ModelName)
 	bodyW, bodyH := m.computeBodySize(defaultWidth, defaultHeight)
 	mainBuf := NewAgentViewBuffer(PrimaryAgentID, "Orchestrator", bodyW, bodyH)
 	mainBuf.SetModelInfo(header.ModelName, header.ProviderName)
@@ -145,6 +149,16 @@ func (m *MainUIModel) computeBodySize(totalW, totalH int) (int, int) {
 		bodyW = max(totalW-leftW-1, 20)
 	}
 	return bodyW, bodyH
+}
+
+var leakedMouseSeqRe = regexp.MustCompile(`^(?:\x1b)?\[?<\d+;\d+;\d+[Mm]$`)
+
+// isLeakedMouseSeq 过滤终端高速滚轮/鼠标上报被拆包后泄漏为普通 KeyRunes 的 SGR 鼠标转义序列（如 [<65;71;14M）
+func isLeakedMouseSeq(msg tea.KeyMsg) bool {
+	if msg.Type != tea.KeyRunes || len(msg.Runes) < 6 {
+		return false
+	}
+	return leakedMouseSeqRe.MatchString(string(msg.Runes))
 }
 
 func (m *MainUIModel) completionMenuHeight() int {
@@ -221,6 +235,11 @@ func (m *MainUIModel) InputBus() *InputBus {
 // Keymap 返回快捷键注册中心，支持外部查询、绑定或重绑定快捷键
 func (m *MainUIModel) Keymap() *KeymapRegistry {
 	return m.keymap
+}
+
+// SetCompactHandler 注册 /compact 上下文压缩回调
+func (m *MainUIModel) SetCompactHandler(fn func(focus string) (int64, int64, error)) {
+	m.onCompact = fn
 }
 
 // WorkflowTree 获取 DAG 拓扑树组件引用
@@ -354,6 +373,9 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if isLeakedMouseSeq(msg) {
+			return m, nil
+		}
 		if m.HandleAskUserKey(msg) {
 			return m, nil
 		}
@@ -635,6 +657,20 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 
+		case CompactionDoneMsg:
+			m.primaryBusy = false
+			m.working.Active = false
+			if specMsg.Err != nil {
+				m.addSystemNotice(fmt.Sprintf("Compact failed: %v", specMsg.Err), true)
+			} else {
+				if m.footer != nil {
+					m.footer.ContextUsed = specMsg.AfterTokens
+				}
+				m.addSystemNotice(fmt.Sprintf("✓ Compacted context: %s → %s tokens",
+					FormatTokenCompact(specMsg.BeforeTokens), FormatTokenCompact(specMsg.AfterTokens)), false)
+			}
+			return m, tea.Batch(cmds...)
+
 		case ErrorMsg:
 			if specMsg.Err != nil {
 				m.workflowTree.MarkStopped()
@@ -775,6 +811,40 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 			buf.Transcript = NewTranscript(m.header.ModelName, m.header.ProviderName)
 			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
 		}
+		if m.footer != nil {
+			m.footer.ContextUsed = 0
+		}
+		return true
+
+	case "/compact":
+		if m.primaryBusy {
+			m.addSystemNotice("Cannot compact while agent is running.", true)
+			return true
+		}
+		if m.onCompact == nil {
+			m.addSystemNotice("Context compaction is unavailable in current mode.", true)
+			return true
+		}
+		focus := ""
+		if len(fields) > 1 {
+			focus = strings.Join(fields[1:], " ")
+		}
+		m.primaryBusy = true
+		m.working.Active = true
+		m.working.TaskDesc = "Compacting context…"
+		m.working.StartedAt = time.Now()
+		before, after, err := m.onCompact(focus)
+		m.primaryBusy = false
+		m.working.Active = false
+		if err != nil {
+			m.addSystemNotice(fmt.Sprintf("Compact failed: %v", err), true)
+		} else {
+			if m.footer != nil {
+				m.footer.ContextUsed = after
+			}
+			m.addSystemNotice(fmt.Sprintf("✓ Compacted context: %s → %s tokens",
+				FormatTokenCompact(before), FormatTokenCompact(after)), false)
+		}
 		return true
 
 	case "/tidy":
@@ -904,6 +974,13 @@ func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry, persist bool) {
 	for _, buf := range m.agentBuffers {
 		buf.SetModelInfo(m.header.ModelName, m.header.ProviderName)
 	}
+	if m.footer != nil {
+		cw := compaction.ResolveContextWindow(entry.FullName)
+		if cw <= 0 {
+			cw = compaction.ResolveContextWindow(entry.ID)
+		}
+		m.footer.ContextWindow = cw
+	}
 	if persist {
 		m.addSystemNotice(fmt.Sprintf("✓ Default model saved: %s (used on next startup)", entry.FullName), false)
 	} else {
@@ -927,52 +1004,6 @@ func (m *MainUIModel) resetSubagentViews() {
 	if hadSubagents {
 		m.resizeAllBuffers()
 	}
-}
-
-// submitUserPrompt 向输入总线提交用户输入：空闲时立即派发，忙碌时进入待处理队列
-func (m *MainUIModel) submitUserPrompt(prompt string) {
-	if m.primaryBusy && m.inputBus != nil {
-		_, qLen := m.inputBus.Enqueue(prompt)
-		m.resizeAllBuffers()
-		preview := ClipToWidth(strings.ReplaceAll(strings.TrimSpace(prompt), "\n", " "), 48, "…")
-		m.addSystemNotice(fmt.Sprintf("⏳ Queued (#%d): %s", qLen, preview), false)
-		return
-	}
-	m.dispatchPrompt(prompt)
-}
-
-func (m *MainUIModel) dispatchPrompt(prompt string) {
-	m.resetSubagentViews()
-	m.primaryBusy = true
-	m.interruptedThisTurn = false
-	if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-		activeBuf.RawTextBuffer += "\n[User]: " + prompt + "\n\n"
-		activeBuf.Transcript.AddUserMessage(prompt, time.Now())
-		activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
-	}
-	if m.onUserSubmit != nil {
-		m.onUserSubmit(prompt)
-	} else {
-		m.primaryBusy = false
-	}
-}
-
-func (m *MainUIModel) rollbackQueuedPrompt() {
-	if m.inputBus == nil {
-		return
-	}
-	item, ok := m.inputBus.RollbackLast()
-	if !ok {
-		return
-	}
-	cur := strings.TrimSpace(m.inputArea.Value())
-	if cur == "" {
-		m.inputArea.SetValue(item.Text)
-	} else {
-		m.inputArea.SetValue(item.Text + " " + cur)
-	}
-	m.inputArea.CursorEnd()
-	m.resizeAllBuffers()
 }
 
 func (m *MainUIModel) applyResumeSession(sessionID string) {
@@ -1023,6 +1054,10 @@ func (m *MainUIModel) applyResumeSession(sessionID string) {
 	}
 	if activeTurn != nil {
 		buf.Transcript.FinishTurn("completed", m.config)
+	}
+	if m.footer != nil {
+		m.footer.ContextWindow = compaction.ResolveContextWindow(m.header.ModelName)
+		m.footer.ContextUsed = compaction.EstimateMessagesTokens(msgs)
 	}
 	buf.Transcript.AddNotice(fmt.Sprintf("✓ Resumed conversation %s (%d messages)", sessionID, len(msgs)))
 	buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
@@ -1172,23 +1207,4 @@ func (m *MainUIModel) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, elements...)
-}
-
-func (m *MainUIModel) renderQueueBar(snap []QueuedPrompt, width int) string {
-	latest := strings.ReplaceAll(strings.TrimSpace(snap[len(snap)-1].Text), "\n", " ")
-	rollbackLabel := "Alt/Cmd+↑"
-	squeezeLabel := "Ctrl+E"
-	if m.keymap != nil {
-		rollbackLabel = m.keymap.HintLabel("rollback_queue", rollbackLabel)
-		squeezeLabel = m.keymap.HintLabel("squeeze_queue", squeezeLabel)
-	}
-	hints := rollbackLabel + " rollback"
-	if len(snap) > 1 {
-		hints += " · " + squeezeLabel + " squeeze"
-	}
-	prefix := m.theme.BoldFg(m.theme.Warning, fmt.Sprintf("⏳ Queued (%d):", len(snap)))
-	suffix := m.theme.Fg(m.theme.Dim, " ["+hints+"]")
-	avail := max(width-VisibleWidth(prefix)-VisibleWidth(suffix)-2, 12)
-	preview := ClipToWidth(latest, avail, "…")
-	return ClipToWidth(prefix+" "+m.theme.Fg(m.theme.Muted, preview)+suffix, width, "…")
 }

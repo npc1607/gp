@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gp/internal/ai"
+	"gp/internal/core/compaction"
 	"gp/internal/core/session"
 	"gp/internal/core/storage"
 	"gp/internal/core/task"
@@ -70,20 +71,24 @@ type AgentInstance struct {
 	streamHandler func(chunk ai.StreamChunk)
 	eventHandler  func(ev AgentEvent)
 	store         storage.Storage
-	taskTree      *task.OwnershipTree
-	systemPrompt  string
+	taskTree             *task.OwnershipTree
+	systemPrompt         string
+	contextWindow        int64
+	autoCompactThreshold float64
 }
 
 func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *tools.Registry) *AgentInstance {
 	initialStatus := StatusIdle
 	a := &AgentInstance{
-		id:          id,
-		roleName:    roleName,
-		sessionTree: session.NewInMemorySession(id),
-		toolReg:     reg,
-		provider:    provider,
-		modelName:   modelName,
-		maxTurns:    500,
+		id:                   id,
+		roleName:             roleName,
+		sessionTree:          session.NewInMemorySession(id),
+		toolReg:              reg,
+		provider:             provider,
+		modelName:            modelName,
+		maxTurns:             500,
+		contextWindow:        compaction.ResolveContextWindow(modelName),
+		autoCompactThreshold: 0.80,
 	}
 	a.status.Store(&initialStatus)
 	return a
@@ -109,6 +114,7 @@ func (a *AgentInstance) SetModelName(m string) {
 	defer a.mu.Unlock()
 	if m != "" {
 		a.modelName = m
+		a.contextWindow = compaction.ResolveContextWindow(m)
 	}
 }
 func (a *AgentInstance) GetProvider() ai.Provider {

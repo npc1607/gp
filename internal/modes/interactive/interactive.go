@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -318,7 +319,9 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 					Active:   true,
 				})
 			}
+			slog.Debug("turn start", "component", "TURN", "prompt_len", len(userPrompt))
 			_, promptErr := ag.Prompt(turnCtx, userPrompt)
+			slog.Debug("turn end", "component", "TURN", "err", promptErr)
 			cancel()
 			cancelMu.Lock()
 			activeCancel = nil
@@ -345,8 +348,16 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		cancel := activeCancel
 		cancelMu.Unlock()
 		if cancel != nil {
+			slog.Debug("cancel_requested", "component", "TURN")
 			cancel()
 		}
+	})
+	uiModel.SetCompactHandler(func(focus string) (int64, int64, error) {
+		res, err := ag.Compact(ctx, focus)
+		if err != nil {
+			return 0, 0, err
+		}
+		return res.BeforeTokens, res.AfterTokens, nil
 	})
 
 	// Headless 测试模式直接返回，避免在无终端环境阻塞 Program.Run

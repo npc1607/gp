@@ -158,6 +158,8 @@ func TestPrintRunner_ModelResolution(t *testing.T) {
 				ModelName: tc.optModel,
 				Writer:    &buf,
 				Provider:  mock,
+				// 隔离真实 ~/.gp/settings.json（用户配置的 model 会覆盖 default 回退）
+				Settings: &settings.Settings{},
 			})
 
 			err := runner.Run(context.Background(), "test prompt")
@@ -218,6 +220,10 @@ func TestPrintRunner_TC_PR_001_CLIExecutionLocalTools(t *testing.T) {
 		Cwd:      tmpDir,
 		Writer:   &outBuf,
 		Provider: mock,
+		// 隔离真实 ~/.gp/settings.json 与 ~/.gp/mcp.json（避免用户 model 覆盖默认值、
+		// 以及测试期间 spawn 真实 MCP 服务）
+		Settings: &settings.Settings{},
+		HomeDir:  tmpDir,
 	})
 
 	task := "请用 read 工具读取 main.go 并做简要说明"
@@ -285,6 +291,7 @@ func TestPrintRunner_TC_MOD_002_ToolAllowlistFallback(t *testing.T) {
 		ToolAllowlist: nil,
 		Settings:      customSettings,
 		Cwd:           tmpDir,
+		HomeDir:       tmpDir, // 隔离真实 ~/.gp/mcp.json，避免 MCP 工具注入白名单 registry
 	})
 
 	inputs := map[string]any{

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gp/internal/ai"
+	"gp/internal/core/compaction"
 	"gp/internal/core/task"
 	"gp/internal/tools"
 )
@@ -138,19 +139,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 			}, nil)
 		}
 
-		messages := a.sessionTree.GetLinearContext()
-		if sp := a.GetSystemPrompt(); sp != "" {
-			hasSys := false
-			for _, m := range messages {
-				if m.Role == ai.RoleSystem {
-					hasSys = true
-					break
-				}
-			}
-			if !hasSys {
-				messages = append([]ai.Message{ai.NewSystemMessage(sp)}, messages...)
-			}
-		}
+		messages := a.maybeAutoCompact(ctx, a.buildModelMessages())
 		a.SetStatus(StatusStreaming)
 
 		req := &ai.ChatRequest{
@@ -184,6 +173,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		var toolOrder []int
 		streamHandler := a.GetStreamHandler()
 		var streamErr error
+		var sawUsage bool
 
 		for chunk := range chunkChan {
 			if chunk.Error != nil {
@@ -231,6 +221,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 			}
 
 			if chunk.Usage != nil {
+				sawUsage = true
 				a.EmitEvent(AgentEvent{
 					Type:  EventUsage,
 					Turn:  turn,
@@ -250,6 +241,20 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 				_ = taskTree.UpdateTask(ctx, sessTaskID, task.TaskStatusFailed, nil)
 			}
 			return "", fmt.Errorf("stream chunk error: %w", streamErr)
+		}
+
+		if !sawUsage {
+			estIn := compaction.EstimateMessagesTokens(messages)
+			estOut := compaction.EstimateTextTokens(textDelta.String()) + compaction.EstimateTextTokens(thinkingDelta.String())
+			a.EmitEvent(AgentEvent{
+				Type: EventUsage,
+				Turn: turn,
+				Usage: &ai.TokenUsage{
+					InputTokens:  estIn,
+					OutputTokens: estOut,
+					TotalTokens:  estIn + estOut,
+				},
+			})
 		}
 
 		if taskTree != nil {

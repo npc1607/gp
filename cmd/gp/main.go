@@ -4,10 +4,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"gp/internal/core/settings"
@@ -25,10 +28,33 @@ var (
 	flagDB      = flag.String("db", ".gp/gp.db", "SQLite 数据库路径")
 	flagModel   = flag.String("model", "", "指定模型标识 (如 antigravity/gemini-4-argon)")
 	flagTools   = flag.String("tools", "", "工具白名单列表 (逗号分隔)")
+	flagDebug   = flag.Bool("debug", false, "启用调试日志输出到 ./logs 目录")
 	flagVersion = flag.Bool("v", false, "查看版本号")
 )
 
 var Version = "v0.1.0-alpha"
+
+// debugEnvEnabled 判断环境变量 GP_DEBUG 是否开启调试日志
+func debugEnvEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("GP_DEBUG")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+// setupDebugLog 开启 slog 调试日志：Debug 级别写入 logs/gp-debug-<时间戳>.log，
+// 并将其设为 slog 默认 logger；未开启时保持默认 Info 级别，Debug 日志静默丢弃。
+func setupDebugLog(dir string) (string, func(), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", func() {}, fmt.Errorf("create log dir %q: %w", dir, err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("gp-debug-%s.log", time.Now().Format("20060102-150405")))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("open debug log %q: %w", path, err)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.Debug("debug log initialized", "component", "CLI", "file", path)
+	return path, func() { _ = f.Close() }, nil
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -93,6 +119,14 @@ func main() {
 
 	flag.Parse()
 
+	if *flagDebug || debugEnvEnabled() {
+		if _, closeLog, logErr := setupDebugLog(filepath.Join(cwd, "logs")); logErr != nil {
+			fmt.Fprintf(os.Stderr, "警告: 初始化调试日志失败: %v\n", logErr)
+		} else {
+			defer closeLog()
+		}
+	}
+
 	if *flagVersion {
 		fmt.Printf("gp (Go Coding Agent Harness) %s\n", Version)
 		return
@@ -113,6 +147,7 @@ func main() {
 
 	remainingArgs := flag.Args()
 	prompt := strings.Join(remainingArgs, " ")
+	slog.Debug("startup", "component", "CLI", "mode", activeMode, "model", modelName, "cwd", cwd)
 
 	var allowlist []string
 	if *flagTools != "" {

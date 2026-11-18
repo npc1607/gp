@@ -729,7 +729,7 @@ func TestTUI_PiZentui_EditorWorkingLineAndFooter(t *testing.T) {
 	if !strings.Contains(view, "Simmering…") || !strings.Contains(view, "(bash)") {
 		t.Fatalf("expected working line embedded in opencode editor border, got:\n%s", view)
 	}
-	if !strings.Contains(view, "ctx: 1.6k/128.0k") || !strings.Contains(view, "↑1.2k ↓350") {
+	if !strings.Contains(view, "ctx: 1.6k/1.00M") || !strings.Contains(view, "↑1.2k ↓350") {
 		t.Fatalf("expected starship footer metrics, got:\n%s", view)
 	}
 

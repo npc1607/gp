@@ -71,6 +71,7 @@ type DAGScheduler struct {
 	nodes             map[string]*TaskNode
 	nodeOrder         []string
 	blackboard        *Blackboard
+	eventBus          *EventBus
 	governor          *Governor
 	defaultRunner     NodeRunner
 	maxRepairAttempts int // 默认 2 次 ("两轮原则熔断器")
@@ -122,6 +123,26 @@ func (s *DAGScheduler) SetMaxRepairAttempts(max int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.maxRepairAttempts = max
+}
+
+// SetEventBus 绑定事件广播总线，用于在节点流转与自愈修复时广播状态事件
+func (s *DAGScheduler) SetEventBus(bus *EventBus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eventBus = bus
+}
+
+func (s *DAGScheduler) publishEvent(topic, source string, payload any) {
+	s.mu.RLock()
+	bus := s.eventBus
+	s.mu.RUnlock()
+	if bus != nil {
+		bus.Publish(BusEvent{
+			Topic:   topic,
+			Source:  source,
+			Payload: payload,
+		})
+	}
 }
 
 // GetNode 获取指定 ID 的节点
@@ -290,6 +311,7 @@ func (s *DAGScheduler) Run(ctx context.Context) error {
 					node.mu.Lock()
 					node.Status = TaskNodeRunning
 					node.mu.Unlock()
+					s.publishEvent("dag.node.started", node.ID, node.AgentRole)
 
 					var out string
 					var runErr error
@@ -319,6 +341,7 @@ func (s *DAGScheduler) Run(ctx context.Context) error {
 						node.Error = nil
 						node.mu.Unlock()
 						s.blackboard.Set(node.ID, out)
+						s.publishEvent("dag.node.completed", node.ID, out)
 						return
 					}
 
@@ -338,6 +361,7 @@ func (s *DAGScheduler) Run(ctx context.Context) error {
 						node.Status = TaskNodeFailed
 						node.Error = ErrCircuitBreakerTripped
 						node.mu.Unlock()
+						s.publishEvent("dag.node.failed", node.ID, ErrCircuitBreakerTripped.Error())
 						setFirstErr(ErrCircuitBreakerTripped)
 						return
 					}
@@ -369,6 +393,7 @@ func (s *DAGScheduler) Run(ctx context.Context) error {
 					implementer.mu.Lock()
 					implementer.Status = TaskNodeRepairing
 					implementer.mu.Unlock()
+					s.publishEvent("dag.node.repairing", implementer.ID, runErr.Error())
 
 					repairPrompt := fmt.Sprintf("\n[Verifier 测试失败反馈 (第 %d 次修复)]:\n%v\n请针对上述错误进行自愈修复。", currentAttempt, runErr)
 					impInput := implementer.TaskPrompt + repairPrompt
@@ -420,6 +445,7 @@ func (s *DAGScheduler) Run(ctx context.Context) error {
 				node.mu.Lock()
 				node.Status = TaskNodeRunning
 				node.mu.Unlock()
+				s.publishEvent("dag.node.started", node.ID, node.AgentRole)
 
 				var out string
 				var runErr error
@@ -437,6 +463,7 @@ func (s *DAGScheduler) Run(ctx context.Context) error {
 					node.Status = TaskNodeFailed
 					node.Error = runErr
 					node.mu.Unlock()
+					s.publishEvent("dag.node.failed", node.ID, runErr.Error())
 					setFirstErr(runErr)
 					return
 				}
@@ -447,6 +474,7 @@ func (s *DAGScheduler) Run(ctx context.Context) error {
 				node.Error = nil
 				node.mu.Unlock()
 				s.blackboard.Set(node.ID, out)
+				s.publishEvent("dag.node.completed", node.ID, out)
 			}
 		}(n)
 	}

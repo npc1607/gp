@@ -39,6 +39,8 @@ type RunnerOptions struct {
 	Provider      ai.Provider
 	SettingsMgr   *settings.Manager
 	Settings      *settings.Settings
+	// HomeDir 可选：覆盖用户 Home 目录（供测试隔离 ~/.gp 下配置），为空时使用 os.UserHomeDir()
+	HomeDir string
 }
 
 // Runner Print 模式运行器
@@ -169,7 +171,10 @@ func (r *Runner) resolveRegistry(cwd string, cfg *settings.Settings) (*tools.Reg
 		reg = reg.ScopedRegistry(cfg.DefaultTools)
 	}
 
-	homeDir, _ := os.UserHomeDir()
+	homeDir := r.opts.HomeDir
+	if homeDir == "" {
+		homeDir, _ = os.UserHomeDir()
+	}
 	_, _ = mcp.AutoConnectAndRegister(context.Background(), cwd, homeDir, reg)
 	_, _ = js.LoadExtensions(cwd, homeDir, reg)
 

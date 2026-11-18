@@ -110,6 +110,13 @@ type ErrorMsg struct {
 	Err error
 }
 
+// CompactionDoneMsg 上下文压缩完成通知消息
+type CompactionDoneMsg struct {
+	BeforeTokens int64
+	AfterTokens  int64
+	Err          error
+}
+
 // tickEvery creates a tea.Cmd that dispatches a TickMsg after the given duration.
 func tickEvery(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg {

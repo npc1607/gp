@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,9 +30,10 @@ type SessionEntry struct {
 	ID        string      `json:"id"`
 	ParentID  string      `json:"parent_id"` // 指向父节点，构建有向无环分支树
 	Timestamp time.Time   `json:"timestamp"`
-	Type      EntryType   `json:"type"`
-	Message   *ai.Message `json:"message,omitempty"`
-	Summary   string      `json:"summary,omitempty"` // 针对压缩条目
+	Type         EntryType    `json:"type"`
+	Message      *ai.Message  `json:"message,omitempty"`
+	Summary      string       `json:"summary,omitempty"`       // 针对压缩条目
+	KeptMessages []ai.Message `json:"kept_messages,omitempty"` // 压缩时保留的尾部近期消息
 }
 
 // SessionTree 会话分支树与线性投影管理器 (对齐 Pi 的 SessionManager)
@@ -159,15 +162,30 @@ func (s *SessionTree) AppendMessage(msg ai.Message) *SessionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.appendEntryLocked(&SessionEntry{
+		Type:    EntryMessage,
+		Message: &msg,
+	})
+}
+
+// AppendCompaction 追加一条上下文压缩锚点（保留早期摘要与近期尾部消息，原始历史仍无损留存）
+func (s *SessionTree) AppendCompaction(summary string, kept []ai.Message) *SessionEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.appendEntryLocked(&SessionEntry{
+		Type:         EntryCompaction,
+		Summary:      summary,
+		KeptMessages: slices.Clone(kept),
+	})
+}
+
+func (s *SessionTree) appendEntryLocked(entry *SessionEntry) *SessionEntry {
 	entryID := fmt.Sprintf("entry_%d_%d", time.Now().UnixNano(), entrySeq.Add(1))
 	now := time.Now()
-	entry := &SessionEntry{
-		ID:        entryID,
-		ParentID:  s.activeLeafID,
-		Timestamp: now,
-		Type:      EntryMessage,
-		Message:   &msg,
-	}
+	entry.ID = entryID
+	entry.ParentID = s.activeLeafID
+	entry.Timestamp = now
 
 	s.entries[entryID] = entry
 	s.activeLeafID = entryID
@@ -191,12 +209,13 @@ func (s *SessionTree) AppendMessage(msg ai.Message) *SessionEntry {
 	return entry
 }
 
-// GetLinearContext 根据当前活跃叶子自底向上回溯，重构成发给大模型的线性历史
+// GetLinearContext 根据当前活跃叶子自底向上回溯，遇到最近压缩锚点即截断拼装发给大模型的线性历史
 func (s *SessionTree) GetLinearContext() []ai.Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var linear []ai.Message
+	var tailAfterCompaction []ai.Message
+	var anchor *SessionEntry
 	currID := s.activeLeafID
 
 	for currID != "" {
@@ -204,17 +223,35 @@ func (s *SessionTree) GetLinearContext() []ai.Message {
 		if !exists {
 			break
 		}
+		if entry.Type == EntryCompaction {
+			anchor = entry
+			break
+		}
 		if entry.Type == EntryMessage && entry.Message != nil {
-			linear = append(linear, *entry.Message)
+			tailAfterCompaction = append(tailAfterCompaction, *entry.Message)
 		}
 		currID = entry.ParentID
 	}
 
 	// 逆序翻转为按时间顺序
-	for i, j := 0, len(linear)-1; i < j; i, j = i+1, j-1 {
-		linear[i], linear[j] = linear[j], linear[i]
+	slices.Reverse(tailAfterCompaction)
+
+	if anchor == nil {
+		return tailAfterCompaction
 	}
-	return linear
+
+	var out []ai.Message
+	if trimmed := strings.TrimSpace(anchor.Summary); trimmed != "" {
+		out = append(out, ai.Message{
+			Role:    ai.RoleUser,
+			Content: "<compacted_context>\n" + trimmed + "\n</compacted_context>",
+		})
+	}
+	if len(anchor.KeptMessages) > 0 {
+		out = append(out, anchor.KeptMessages...)
+	}
+	out = append(out, tailAfterCompaction...)
+	return out
 }
 
 // SwitchBranch 切换活跃分支（支持撤销与重试分支）

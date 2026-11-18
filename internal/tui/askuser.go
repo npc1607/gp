@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -87,6 +88,7 @@ func NewAskUserDialogState(msg AskUserQuestionMsg) *AskUserDialogState {
 		}
 	}
 	editingCustom := len(msg.Questions) > 0 && len(msg.Questions[0].Options) == 0
+	slog.Debug("open", "component", "ASKUSER", "questions", len(msg.Questions), "auto_editing_custom", editingCustom)
 	return &AskUserDialogState{
 		Active:        true,
 		Questions:     msg.Questions,
@@ -190,6 +192,7 @@ func (d *AskUserDialogState) finish(cancelled bool) {
 		return
 	}
 	res := d.buildResult(cancelled)
+	slog.Debug("finish", "component", "ASKUSER", "cancelled", cancelled, "answers", len(res.Answers))
 	d.Active = false
 	if d.ResponseCh != nil {
 		select {
