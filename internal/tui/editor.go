@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // WorkingSpinners 对应 pi-zentui 的 5 套工作行动画预设
@@ -71,6 +72,7 @@ type EditorMeta struct {
 	ProviderName  string
 	ThinkingLevel string
 	VimBadge      string
+	SelectedAll   bool
 	RightHint     string
 	ShellMode     bool
 }
@@ -109,6 +111,10 @@ func RenderEditor(
 	// 输入行内容（直接使用 textinput.View()，完整支持左右移动光标、Ctrl+W/Alt+Backspace 删词及长文本水平滚动）
 	input.Width = max(innerW-2, 8)
 	inputLine := ClipToWidth(input.View(), innerW, "")
+	if meta.SelectedAll && input.Value() != "" {
+		selText := ClipToWidth(input.Value(), max(innerW-2, 8), "…")
+		inputLine = lipgloss.NewStyle().Reverse(true).Render(selText)
+	}
 
 	// 元数据行: <provider-icon> <model>  <thinking>        <rightHint>
 	pIcon := ProviderIcon(meta.ProviderName, meta.ModelName, cfg.Icons)
@@ -139,6 +145,9 @@ func RenderEditor(
 		} else {
 			leftMeta = append(leftMeta, t.Fg(t.Success, "-- INSERT --"))
 		}
+	}
+	if meta.SelectedAll {
+		leftMeta = append(leftMeta, t.BoldFg(t.Warning, "[ALL]"))
 	}
 	metaLeft := strings.Join(leftMeta, " ")
 	metaRight := ""
@@ -203,7 +212,20 @@ func RenderZoomedEditor(
 
 	area.SetWidth(max(innerW-2, 12))
 	area.SetHeight(ZoomedEditorHeight - 3)
-	rawLines := strings.Split(area.View(), "\n")
+	var rawLines []string
+	if meta.SelectedAll && area.Value() != "" {
+		selStyle := lipgloss.NewStyle().Reverse(true)
+		for l := range strings.SplitSeq(area.Value(), "\n") {
+			clipped := ClipToWidth(l, max(innerW-2, 8), "…")
+			if clipped != "" {
+				rawLines = append(rawLines, selStyle.Render(clipped))
+			} else {
+				rawLines = append(rawLines, "")
+			}
+		}
+	} else {
+		rawLines = strings.Split(area.View(), "\n")
+	}
 	for len(rawLines) < ZoomedEditorHeight-3 {
 		rawLines = append(rawLines, "")
 	}
@@ -233,6 +255,9 @@ func RenderZoomedEditor(
 		} else {
 			leftMeta = append(leftMeta, t.Fg(t.Success, "-- INSERT --"))
 		}
+	}
+	if meta.SelectedAll {
+		leftMeta = append(leftMeta, t.BoldFg(t.Warning, "[ALL]"))
 	}
 	metaLine := composeLeftRight(strings.Join(leftMeta, " "), t.Fg(t.Muted, meta.RightHint), innerW)
 	rows = append(rows, rail+PadToWidth(metaLine, innerW), botBorder)

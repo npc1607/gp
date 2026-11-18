@@ -192,6 +192,20 @@ func RegisterDefaultKeybindings(km *KeymapRegistry) {
 	})
 
 	km.Register(KeyBinding{
+		ID:          "select_all",
+		Keys:        []string{"ctrl+a"},
+		Label:       "Ctrl+A",
+		Description: "Select all text in active editor",
+		Category:    "editor",
+		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
+			if m.activeInputText() != "" {
+				m.editorSelectedAll = true
+			}
+			return nil, true
+		},
+	})
+
+	km.Register(KeyBinding{
 		ID:          "toggle_editor_zoom",
 		Keys:        []string{"ctrl+x"},
 		Label:       "Ctrl+X",
@@ -229,8 +243,8 @@ func RegisterDefaultKeybindings(km *KeymapRegistry) {
 
 	km.Register(KeyBinding{
 		ID:          "submit_zoomed",
-		Keys:        []string{"alt+enter"},
-		Label:       "Alt+Enter",
+		Keys:        []string{"alt+enter", "ctrl+d"},
+		Label:       "Alt+Enter / Ctrl+D",
 		Description: "Submit prompt from zoomed multi-line editor",
 		Category:    "editor",
 		When: func(m *MainUIModel) bool {
@@ -295,6 +309,9 @@ func RegisterDefaultKeybindings(km *KeymapRegistry) {
 		Label:       "↑",
 		Description: "Scroll transcript up 1 line",
 		Category:    "navigation",
+		When: func(m *MainUIModel) bool {
+			return !m.editorZoomed
+		},
 		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
 			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 				activeBuf.Scroll(-1)
@@ -310,6 +327,9 @@ func RegisterDefaultKeybindings(km *KeymapRegistry) {
 		Label:       "↓",
 		Description: "Scroll transcript down 1 line",
 		Category:    "navigation",
+		When: func(m *MainUIModel) bool {
+			return !m.editorZoomed
+		},
 		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
 			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 				activeBuf.Scroll(1)

@@ -54,6 +54,7 @@ type MainUIModel struct {
 	inputArea           textinput.Model
 	zoomArea            textarea.Model
 	editorZoomed        bool
+	editorSelectedAll   bool
 	inputBus            *InputBus
 	inputHistory        *InputHistory
 	vim                 *VimState
@@ -198,6 +199,8 @@ func (m *MainUIModel) completionMenuHeight() int {
 
 func (m *MainUIModel) resizeAllBuffers() {
 	bodyW, bodyH := m.computeBodySize(m.width, m.height)
+	m.zoomArea.SetWidth(max(m.width-4, 12))
+	m.zoomArea.SetHeight(ZoomedEditorHeight - 3)
 	m.inputArea.Width = m.width - 4
 	for _, buf := range m.agentBuffers {
 		buf.Resize(bodyW, bodyH)
@@ -408,7 +411,10 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.HandleOverlayKey(msg) {
 			return m, nil
 		}
-		matches := MatchSlashCommands(m.inputArea.Value())
+		var matches []SlashCommand
+		if !m.editorZoomed {
+			matches = MatchSlashCommands(m.inputArea.Value())
+		}
 		if len(matches) > 0 {
 			if m.compCursor >= len(matches) {
 				m.compCursor = len(matches) - 1
@@ -453,6 +459,21 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.resizeAllBuffers()
 					m.handleLocalCommand(chosen.Name)
 					return m, nil
+				}
+			}
+		}
+		if m.editorSelectedAll {
+			switch msg.String() {
+			case "backspace", "delete", "ctrl+w", "ctrl+u":
+				m.setActiveInputText("")
+				m.editorSelectedAll = false
+				return m, nil
+			case "ctrl+a":
+				// keep selected
+			default:
+				m.editorSelectedAll = false
+				if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+					m.setActiveInputText("")
 				}
 			}
 		}
@@ -1241,21 +1262,23 @@ func (m *MainUIModel) View() string {
 
 	// pi-zentui Opencode Editor (内嵌 Working Line)
 	foldKey := "ctrl+o"
-	thinkKey := "ctrl+t"
 	dagKey := "ctrl+g"
 	stopKey := "esc"
 	if m.keymap != nil {
 		foldKey = m.keymap.HintLabel("toggle_folds", foldKey)
-		thinkKey = m.keymap.HintLabel("toggle_thinking", thinkKey)
 		dagKey = m.keymap.HintLabel("toggle_dag", dagKey)
 		stopKey = strings.ToLower(m.keymap.HintLabel("interrupt_or_rollback", stopKey))
 	}
-	rightHint := "ctrl+x zoom · " + foldKey + " fold · " + thinkKey + " think"
-	if m.primaryBusy {
-		rightHint = stopKey + " stop · " + rightHint
-	}
-	if len(m.workflowTree.nodes) > 0 {
-		rightHint = dagKey + " dag · " + rightHint
+	rightHint := "ctrl+x zoom · " + foldKey + " fold"
+	if m.editorSelectedAll {
+		rightHint = "Backspace/Del clear · Type replace · Esc cancel"
+	} else {
+		if m.primaryBusy {
+			rightHint = stopKey + " stop · " + rightHint
+		}
+		if len(m.workflowTree.nodes) > 0 {
+			rightHint = dagKey + " dag · " + rightHint
+		}
 	}
 	vimBadge := ""
 	if m.vim != nil && m.vim.Enabled {
@@ -1266,6 +1289,7 @@ func (m *MainUIModel) View() string {
 		ProviderName:  m.header.ProviderName,
 		ThinkingLevel: m.header.ThinkingLevel,
 		VimBadge:      vimBadge,
+		SelectedAll:   m.editorSelectedAll,
 		RightHint:     rightHint,
 	}
 	var editorStr string

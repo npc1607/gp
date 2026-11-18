@@ -101,4 +101,29 @@ func TestEditor_ZoomAndInputHistory(t *testing.T) {
 	if len(submitted) != 3 || submitted[2] != "my draft" {
 		t.Fatalf("expected Alt+Enter to submit 'my draft', got %v", submitted)
 	}
+
+	// Toggle back to compact editor, then Select All (Ctrl+A) + replace by typing
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlX})
+	m.inputArea.SetValue("old text")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	if !m.editorSelectedAll {
+		t.Fatalf("expected editorSelectedAll=true after Ctrl+A")
+	}
+	if !strings.Contains(m.View(), "[ALL]") {
+		t.Fatalf("expected '[ALL]' badge in view")
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if got := m.inputArea.Value(); got != "n" {
+		t.Fatalf("expected typing after Ctrl+A to replace text with 'n', got %q", got)
+	}
+
+	// Zoomed multi-line editor in Vim INSERT mode: Up/Down moves cursor inside zoomArea (does not scroll transcript)
+	m.handleLocalCommand("/vim on")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlX})
+	m.zoomArea.SetValue("line1\nline2")
+	initLine := m.zoomArea.Line()
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if m.zoomArea.Line() >= initLine {
+		t.Fatalf("expected Up in zoomed Vim INSERT mode to move cursor up from line %d, got %d", initLine, m.zoomArea.Line())
+	}
 }

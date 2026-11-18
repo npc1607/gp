@@ -20,9 +20,10 @@ func (m *MainUIModel) setActiveInputText(text string) {
 
 func (m *MainUIModel) toggleEditorZoom() {
 	if m.editorZoomed {
-		// 切回紧凑输入框：保留当前文本（将换行折叠为空格以便单行展示）
+		// 切回紧凑输入框：保留当前文本
 		text := m.zoomArea.Value()
 		m.editorZoomed = false
+		m.zoomArea.Reset()
 		m.zoomArea.Blur()
 		m.inputArea.Focus()
 		m.inputArea.SetValue(text)
@@ -31,6 +32,7 @@ func (m *MainUIModel) toggleEditorZoom() {
 		// 切入放大多行编辑器
 		text := m.inputArea.Value()
 		m.editorZoomed = true
+		m.inputArea.Reset()
 		m.inputArea.Blur()
 		m.zoomArea.Focus()
 		m.zoomArea.SetValue(text)

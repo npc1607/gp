@@ -68,8 +68,8 @@ func TestKeymapRegistry_RebindDispatchInMainUI(t *testing.T) {
 	_, _ = m.Update(UserSubmitPromptMsg{Prompt: "queued 1"})
 	_, _ = m.Update(UserSubmitPromptMsg{Prompt: "queued 2"})
 
-	// Rebind squeeze_queue from ctrl+e to ctrl+k
-	if !m.Keymap().Rebind("squeeze_queue", "Ctrl+K", "ctrl+k") {
+	// Rebind squeeze_queue from ctrl+e to ctrl+y
+	if !m.Keymap().Rebind("squeeze_queue", "Ctrl+Y", "ctrl+y") {
 		t.Fatalf("Rebind failed")
 	}
 	// Old key should not squeeze
@@ -78,8 +78,8 @@ func TestKeymapRegistry_RebindDispatchInMainUI(t *testing.T) {
 		t.Fatalf("expected old key ctrl+e not to squeeze, Len() = %d, want 2", got)
 	}
 	// New key should squeeze
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
 	if got := m.InputBus().Len(); got != 1 {
-		t.Fatalf("expected rebound key ctrl+k to squeeze to 1, Len() = %d", got)
+		t.Fatalf("expected rebound key ctrl+y to squeeze to 1, Len() = %d", got)
 	}
 }
