@@ -100,8 +100,6 @@ func main() {
 					allowlist = append(allowlist, trimmed)
 				}
 			}
-		} else if len(cfg.DefaultTools) > 0 {
-			allowlist = append(allowlist, cfg.DefaultTools...)
 		}
 
 		modelName := *resumeModel
@@ -164,8 +162,6 @@ func main() {
 				allowlist = append(allowlist, trimmed)
 			}
 		}
-	} else if len(cfg.DefaultTools) > 0 {
-		allowlist = append(allowlist, cfg.DefaultTools...)
 	}
 
 	switch activeMode {

@@ -13,6 +13,7 @@ import (
 	"gp/internal/core/compaction"
 	"gp/internal/core/storage"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -51,7 +52,11 @@ type MainUIModel struct {
 	overlay         *OverlayState
 	askUser             *AskUserDialogState
 	inputArea           textinput.Model
+	zoomArea            textarea.Model
+	editorZoomed        bool
 	inputBus            *InputBus
+	inputHistory        *InputHistory
+	vim                 *VimState
 	keymap              *KeymapRegistry
 	primaryBusy         bool
 	interruptedThisTurn bool
@@ -81,6 +86,13 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 	ti.CharLimit = 0
 	ti.Focus()
 
+	za := textarea.New()
+	za.Prompt = ""
+	za.Placeholder = "Multi-line editor (Alt+Enter send · Ctrl+X compact)..."
+	za.CharLimit = 0
+	za.ShowLineNumbers = false
+	za.SetHeight(ZoomedEditorHeight - 3)
+
 	defaultWidth := 100
 	defaultHeight := 30
 	cfg := DefaultUIConfig()
@@ -100,7 +112,10 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 		authStore:    auth.NewStore(""),
 		overlay:      &OverlayState{},
 		inputArea:    ti,
+		zoomArea:     za,
 		inputBus:     NewInputBus(),
+		inputHistory: NewInputHistory(),
+		vim:          NewVimState(),
 		keymap:       NewDefaultKeymap(),
 		width:        defaultWidth,
 		height:       defaultHeight,
@@ -125,6 +140,9 @@ func (m *MainUIModel) computeBodySize(totalW, totalH int) (int, int) {
 		totalH = 12
 	}
 	deductH := EditorHeight(m.config)
+	if m.editorZoomed {
+		deductH = ZoomedEditorHeight
+	}
 	if m.config.FooterStyle != "hidden" {
 		deductH++
 	}
@@ -438,6 +456,9 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		if cmd, handled := m.HandleVimKey(msg); handled {
+			return m, cmd
+		}
 		if m.keymap != nil {
 			if cmd, handled := m.keymap.Dispatch(msg.String(), m); handled {
 				return m, cmd
@@ -445,6 +466,10 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		var cmd tea.Cmd
+		if m.editorZoomed {
+			m.zoomArea, cmd = m.zoomArea.Update(msg)
+			return m, cmd
+		}
 		prevCompH := m.completionMenuHeight()
 		m.inputArea, cmd = m.inputArea.Update(msg)
 		if m.completionMenuHeight() != prevCompH {
@@ -885,6 +910,29 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		}
 		return true
 
+	case "/vim":
+		if m.vim == nil {
+			m.vim = NewVimState()
+		}
+		if len(fields) >= 2 {
+			switch strings.ToLower(fields[1]) {
+			case "on", "true", "1":
+				m.vim.SetEnabled(true)
+			case "off", "false", "0":
+				m.vim.SetEnabled(false)
+			default:
+				m.vim.Toggle()
+			}
+		} else {
+			m.vim.Toggle()
+		}
+		if m.vim.Enabled {
+			m.addSystemNotice("✓ Vim mode enabled (Esc -> NORMAL, i/a -> INSERT)", false)
+		} else {
+			m.addSystemNotice("✓ Vim mode disabled", false)
+		}
+		return true
+
 	case "/zentui":
 		if len(fields) >= 3 && fields[1] == "preset" {
 			switch fields[2] {
@@ -1202,19 +1250,30 @@ func (m *MainUIModel) View() string {
 		dagKey = m.keymap.HintLabel("toggle_dag", dagKey)
 		stopKey = strings.ToLower(m.keymap.HintLabel("interrupt_or_rollback", stopKey))
 	}
-	rightHint := foldKey + " fold · " + thinkKey + " think"
+	rightHint := "ctrl+x zoom · " + foldKey + " fold · " + thinkKey + " think"
 	if m.primaryBusy {
 		rightHint = stopKey + " stop · " + rightHint
 	}
 	if len(m.workflowTree.nodes) > 0 {
 		rightHint = dagKey + " dag · " + rightHint
 	}
-	editorStr := RenderEditor(m.inputArea, width, m.theme, m.config, EditorMeta{
+	vimBadge := ""
+	if m.vim != nil && m.vim.Enabled {
+		vimBadge = string(m.vim.Mode)
+	}
+	meta := EditorMeta{
 		ModelName:     m.header.ModelName,
 		ProviderName:  m.header.ProviderName,
 		ThinkingLevel: m.header.ThinkingLevel,
+		VimBadge:      vimBadge,
 		RightHint:     rightHint,
-	}, m.working)
+	}
+	var editorStr string
+	if m.editorZoomed {
+		editorStr = RenderZoomedEditor(m.zoomArea, width, m.theme, m.config, meta, m.working)
+	} else {
+		editorStr = RenderEditor(m.inputArea, width, m.theme, m.config, meta, m.working)
+	}
 	elements = append(elements, editorStr)
 
 	// 斜杠指令补全提示菜单（紧贴编辑器下方，对齐 pi-zentui）

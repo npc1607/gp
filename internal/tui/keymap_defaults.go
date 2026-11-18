@@ -192,20 +192,99 @@ func RegisterDefaultKeybindings(km *KeymapRegistry) {
 	})
 
 	km.Register(KeyBinding{
+		ID:          "toggle_editor_zoom",
+		Keys:        []string{"ctrl+x"},
+		Label:       "Ctrl+X",
+		Description: "Toggle expanded multi-line editor",
+		Category:    "editor",
+		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
+			m.toggleEditorZoom()
+			return nil, true
+		},
+	})
+
+	km.Register(KeyBinding{
+		ID:          "history_prev_ctrl",
+		Keys:        []string{"ctrl+p"},
+		Label:       "Ctrl+P",
+		Description: "Recall previous input from history",
+		Category:    "editor",
+		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
+			m.navigateHistoryPrev()
+			return nil, true
+		},
+	})
+
+	km.Register(KeyBinding{
+		ID:          "history_next_ctrl",
+		Keys:        []string{"ctrl+n"},
+		Label:       "Ctrl+N",
+		Description: "Move to next input in history",
+		Category:    "editor",
+		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
+			m.navigateHistoryNext()
+			return nil, true
+		},
+	})
+
+	km.Register(KeyBinding{
+		ID:          "submit_zoomed",
+		Keys:        []string{"alt+enter"},
+		Label:       "Alt+Enter",
+		Description: "Submit prompt from zoomed multi-line editor",
+		Category:    "editor",
+		When: func(m *MainUIModel) bool {
+			return m.editorZoomed
+		},
+		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
+			m.submitActiveEditor()
+			return nil, true
+		},
+	})
+
+	km.Register(KeyBinding{
 		ID:          "submit_input",
 		Keys:        []string{"enter"},
 		Label:       "Enter",
 		Description: "Submit prompt or local slash command",
 		Category:    "editor",
+		When: func(m *MainUIModel) bool {
+			return !m.editorZoomed
+		},
 		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
-			val := strings.TrimSpace(m.inputArea.Value())
-			if val != "" {
-				m.inputArea.Reset()
-				if m.handleLocalCommand(val) {
-					return nil, true
-				}
-				m.submitUserPrompt(val)
-			}
+			m.submitActiveEditor()
+			return nil, true
+		},
+	})
+
+	km.Register(KeyBinding{
+		ID:          "history_prev_up",
+		Keys:        []string{"up"},
+		Label:       "↑",
+		Description: "Recall previous input when history exists",
+		Category:    "editor",
+		When: func(m *MainUIModel) bool {
+			return !m.editorZoomed && m.inputHistory != nil && m.inputHistory.Len() > 0 &&
+				len(MatchSlashCommands(m.inputArea.Value())) == 0
+		},
+		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
+			m.navigateHistoryPrev()
+			return nil, true
+		},
+	})
+
+	km.Register(KeyBinding{
+		ID:          "history_next_down",
+		Keys:        []string{"down"},
+		Label:       "↓",
+		Description: "Move to next input when browsing history",
+		Category:    "editor",
+		When: func(m *MainUIModel) bool {
+			return !m.editorZoomed && m.inputHistory != nil && m.inputHistory.IsBrowsing() &&
+				len(MatchSlashCommands(m.inputArea.Value())) == 0
+		},
+		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
+			m.navigateHistoryNext()
 			return nil, true
 		},
 	})

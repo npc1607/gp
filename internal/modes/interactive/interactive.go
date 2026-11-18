@@ -552,6 +552,39 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		return nil
 	})
 
+	var toolNames []string
+	for _, t := range reg.List() {
+		toolNames = append(toolNames, t.Name())
+	}
+	var skillItems []tui.SkillStatusItem
+	if skills, err := resLoader.LoadSkills(); err == nil {
+		for _, s := range skills {
+			skillItems = append(skillItems, tui.SkillStatusItem{Name: s.Name, Enabled: s.Enabled})
+		}
+	}
+	var mcpItems []tui.MCPStatusItem
+	var disabledMCPs []string
+	if cfg != nil {
+		disabledMCPs = cfg.DisabledMCPs
+	}
+	if statuses, err := mcp.InspectServers(cwd, homeDir, disabledMCPs, activeClients); err == nil {
+		for _, st := range statuses {
+			mcpItems = append(mcpItems, tui.MCPStatusItem{
+				Name:      st.Name,
+				Enabled:   st.Enabled,
+				Connected: st.Connected,
+				ToolCount: st.ToolCount,
+			})
+		}
+	}
+	uiModel.ShowStartupBanner(tui.StartupSummary{
+		Version:   header.Version,
+		ModelName: modelName,
+		Tools:     toolNames,
+		Skills:    skillItems,
+		MCPs:      mcpItems,
+	})
+
 	p = tea.NewProgram(uiModel, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	tools.SetUIEventSender(func(msg any) {
 		if p != nil {

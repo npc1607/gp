@@ -22,6 +22,7 @@ var BuiltinSlashCommands = []SlashCommand{
 	{Name: "/login", Usage: "/login [qoder|deepseek]", Description: "登录并保存 Provider 凭证到 ~/.gp/auth.db"},
 	{Name: "/logout", Usage: "/logout [provider]", Description: "注销并清除已保存的 Provider 凭证"},
 	{Name: "/zentui", Usage: "/zentui preset opencode|rail|minimalist", Description: "实时切换编辑器、用户消息与状态栏样式预设"},
+	{Name: "/vim", Usage: "/vim [on|off]", Description: "开启或关闭 Vim 编辑模式（NORMAL/INSERT）"},
 	{Name: "/tidy", Usage: "/tidy [turn]", Description: "开关 Turn 自动折叠或切换最近一轮折叠状态"},
 	{Name: "/clear", Usage: "/clear", Description: "清空当前 Agent 会话缓冲区"},
 }
