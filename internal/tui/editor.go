@@ -122,8 +122,14 @@ func RenderEditor(
 	if meta.ProviderName != "" {
 		leftMeta = append(leftMeta, t.Fg(t.Muted, meta.ProviderName))
 	}
-	if meta.ThinkingLevel != "" && meta.ThinkingLevel != "off" {
-		leftMeta = append(leftMeta, t.Fg(t.Warning, meta.ThinkingLevel))
+	thinkLevel := strings.TrimSpace(meta.ThinkingLevel)
+	if thinkLevel == "" {
+		thinkLevel = "off"
+	}
+	if thinkLevel == "off" {
+		leftMeta = append(leftMeta, t.Fg(t.Muted, "think:"+thinkLevel))
+	} else {
+		leftMeta = append(leftMeta, t.Fg(t.Warning, "think:"+thinkLevel))
 	}
 	metaLeft := strings.Join(leftMeta, " ")
 	metaRight := ""

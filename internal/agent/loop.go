@@ -143,9 +143,10 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		a.SetStatus(StatusStreaming)
 
 		req := &ai.ChatRequest{
-			Model:    a.ModelName(),
-			Messages: messages,
-			Tools:    toolDefs,
+			Model:         a.ModelName(),
+			Messages:      messages,
+			Tools:         toolDefs,
+			ThinkingLevel: a.GetThinkingLevel(),
 		}
 
 		chunkChan, err := a.GetProvider().StreamChat(ctx, req)

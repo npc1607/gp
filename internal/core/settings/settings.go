@@ -27,18 +27,26 @@ type Settings struct {
 	MaxConcurrency int      `json:"max_concurrency,omitempty"`
 	TokensPerMin   int      `json:"tokens_per_min,omitempty"`
 	SystemPrompt   string   `json:"system_prompt,omitempty"`
+	SkillDirs          []string `json:"skill_dirs,omitempty"`
+	DisabledSkills     []string `json:"disabled_skills,omitempty"`
+	UnregisteredSkills []string `json:"unregistered_skills,omitempty"`
+	DisabledMCPs       []string `json:"disabled_mcps,omitempty"`
 }
 
 // rawSettings 用于辅助 JSON 反序列化时区分 omitted 与 empty，防止未声明字段覆盖前序层叠值
 type rawSettings struct {
-	Model          *string   `json:"model"`
-	BaseURL        *string   `json:"base_url"`
-	APIKey         *string   `json:"api_key"`
-	ThinkingLevel  *string   `json:"thinking_level"`
-	DefaultTools   *[]string `json:"default_tools"`
-	MaxConcurrency *int      `json:"max_concurrency"`
-	TokensPerMin   *int      `json:"tokens_per_min"`
-	SystemPrompt   *string   `json:"system_prompt"`
+	Model              *string   `json:"model"`
+	BaseURL            *string   `json:"base_url"`
+	APIKey             *string   `json:"api_key"`
+	ThinkingLevel      *string   `json:"thinking_level"`
+	DefaultTools       *[]string `json:"default_tools"`
+	MaxConcurrency     *int      `json:"max_concurrency"`
+	TokensPerMin       *int      `json:"tokens_per_min"`
+	SystemPrompt       *string   `json:"system_prompt"`
+	SkillDirs          *[]string `json:"skill_dirs"`
+	DisabledSkills     *[]string `json:"disabled_skills"`
+	UnregisteredSkills *[]string `json:"unregistered_skills"`
+	DisabledMCPs       *[]string `json:"disabled_mcps"`
 }
 
 // DefaultSettings 返回包含标准缺省值的配置对象
@@ -60,6 +68,18 @@ func (s Settings) Clone() Settings {
 	if s.DefaultTools != nil {
 		cloned.DefaultTools = make([]string, len(s.DefaultTools))
 		copy(cloned.DefaultTools, s.DefaultTools)
+	}
+	if s.SkillDirs != nil {
+		cloned.SkillDirs = append([]string(nil), s.SkillDirs...)
+	}
+	if s.DisabledSkills != nil {
+		cloned.DisabledSkills = append([]string(nil), s.DisabledSkills...)
+	}
+	if s.UnregisteredSkills != nil {
+		cloned.UnregisteredSkills = append([]string(nil), s.UnregisteredSkills...)
+	}
+	if s.DisabledMCPs != nil {
+		cloned.DisabledMCPs = append([]string(nil), s.DisabledMCPs...)
 	}
 	return cloned
 }
@@ -173,6 +193,18 @@ func (m *Manager) loadFromFile(path string, target *Settings) error {
 	}
 	if raw.SystemPrompt != nil {
 		target.SystemPrompt = *raw.SystemPrompt
+	}
+	if raw.SkillDirs != nil {
+		target.SkillDirs = append([]string(nil), (*raw.SkillDirs)...)
+	}
+	if raw.DisabledSkills != nil {
+		target.DisabledSkills = append([]string(nil), (*raw.DisabledSkills)...)
+	}
+	if raw.UnregisteredSkills != nil {
+		target.UnregisteredSkills = append([]string(nil), (*raw.UnregisteredSkills)...)
+	}
+	if raw.DisabledMCPs != nil {
+		target.DisabledMCPs = append([]string(nil), (*raw.DisabledMCPs)...)
 	}
 	return nil
 }

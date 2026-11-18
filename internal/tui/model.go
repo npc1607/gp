@@ -64,11 +64,13 @@ type MainUIModel struct {
 	onUserSubmit        func(prompt string)
 	onCancel            func()
 	onModelChange       func(entry auth.ModelEntry, persist bool) error
-	onAuthChange    func(providerID string)
-	onListSessions  func() ([]storage.SessionSummary, error)
-	onResumeSession func(sessionID string) ([]ai.Message, error)
-	onCompact       func(focus string) (int64, int64, error)
-	fpsTicker       time.Duration
+	onThinkingChange    func(level string) error
+	onAuthChange        func(providerID string)
+	onListSessions   func() ([]storage.SessionSummary, error)
+	onResumeSession  func(sessionID string) ([]ai.Message, error)
+	onCompact        func(focus string) (int64, int64, error)
+	resourceHandlers ResourceHandlers
+	fpsTicker        time.Duration
 }
 
 // NewMainUIModel 创建全局终端界面主模型
@@ -169,10 +171,11 @@ func (m *MainUIModel) completionMenuHeight() int {
 	if len(matches) == 0 {
 		return 0
 	}
+	// +2 对应 RenderCompletionMenu 外框上下边框行，确保与编辑器及底部状态栏保持清晰间距
 	if len(matches) > 6 {
-		return 6
+		return 6 + 2
 	}
-	return len(matches)
+	return len(matches) + 2
 }
 
 func (m *MainUIModel) resizeAllBuffers() {
@@ -240,6 +243,11 @@ func (m *MainUIModel) Keymap() *KeymapRegistry {
 // SetCompactHandler 注册 /compact 上下文压缩回调
 func (m *MainUIModel) SetCompactHandler(fn func(focus string) (int64, int64, error)) {
 	m.onCompact = fn
+}
+
+// SetThinkingChangeHandler 注册思考深度变更回调
+func (m *MainUIModel) SetThinkingChangeHandler(fn func(level string) error) {
+	m.onThinkingChange = fn
 }
 
 // WorkflowTree 获取 DAG 拓扑树组件引用
@@ -803,6 +811,8 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		m.overlay.Cursor = 0
 		m.overlay.SearchQuery = query
 		m.overlay.Models = models
+		m.overlay.ThinkingLevel = m.header.ThinkingLevel
+		m.overlay.syncThinkingOptionsForCursor(m.header.ProviderName, m.header.ModelName)
 		return true
 
 	case "/clear":
@@ -815,6 +825,12 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 			m.footer.ContextUsed = 0
 		}
 		return true
+
+	case "/skills":
+		return m.handleSkillsCommand(fields)
+
+	case "/mcp":
+		return m.handleMCPCommand(fields)
 
 	case "/compact":
 		if m.primaryBusy {
@@ -986,6 +1002,16 @@ func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry, persist bool) {
 	} else {
 		m.addSystemNotice(fmt.Sprintf("✓ Model: %s", entry.FullName), false)
 	}
+}
+
+func (m *MainUIModel) applyThinkingSelection(level string) {
+	if m.onThinkingChange != nil {
+		if err := m.onThinkingChange(level); err != nil {
+			m.addSystemNotice(fmt.Sprintf("Set thinking level failed: %v", err), true)
+			return
+		}
+	}
+	m.header.ThinkingLevel = level
 }
 
 // resetSubagentViews 清理上一轮对话产生的子 Agent Tab、DAG 拓扑树及托盘状态，恢复主视图显示

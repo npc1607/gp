@@ -839,7 +839,7 @@ func TestTUI_SlashCommandCompletion(t *testing.T) {
 	// Typing "/" shows completion menu
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
 	view := m.View()
-	if !strings.Contains(view, "/models") || !strings.Contains(view, "/login") || !strings.Contains(view, "/zentui") {
+	if !strings.Contains(view, "/models") || !strings.Contains(view, "/skills") || !strings.Contains(view, "/mcp") {
 		t.Fatalf("expected slash command completion menu in view, got:\n%s", view)
 	}
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"gp/internal/agent"
 	"gp/internal/ai"
@@ -82,7 +83,11 @@ func (r *ResumeRunner) Run(ctx context.Context, _ string) error {
 
 	dbPath := r.Opts.DBPath
 	if dbPath == "" {
-		dbPath = ".gp/gp.db"
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			dbPath = filepath.Join(home, ".gp", "gp.db")
+		} else {
+			dbPath = filepath.Join(".gp", "gp.db")
+		}
 	}
 
 	if dbPath != ":memory:" && dbPath != "file::memory:?cache=shared" {

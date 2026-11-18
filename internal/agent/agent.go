@@ -73,6 +73,7 @@ type AgentInstance struct {
 	store         storage.Storage
 	taskTree             *task.OwnershipTree
 	systemPrompt         string
+	thinkingLevel        string
 	contextWindow        int64
 	autoCompactThreshold float64
 }
@@ -116,6 +117,20 @@ func (a *AgentInstance) SetModelName(m string) {
 		a.modelName = m
 		a.contextWindow = compaction.ResolveContextWindow(m)
 	}
+}
+
+// SetThinkingLevel 设置模型推理思考深度 ("off" | "low" | "medium" | "high")
+func (a *AgentInstance) SetThinkingLevel(level string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.thinkingLevel = level
+}
+
+// GetThinkingLevel 获取当前模型推理思考深度
+func (a *AgentInstance) GetThinkingLevel() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.thinkingLevel
 }
 func (a *AgentInstance) GetProvider() ai.Provider {
 	a.mu.RLock()

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"gp/internal/ai"
 	"gp/internal/core/auth"
 	"gp/internal/core/storage"
 
@@ -21,9 +22,11 @@ const (
 	OverlayLoginKey
 	OverlayLogoutSelect
 	OverlayResumeSelect
+	OverlaySkillsSelect
+	OverlayMCPSelect
 )
 
-// OverlayState 管理 /model、/login、/logout 的交互式选择与输入状态
+// OverlayState 管理 /model、/login、/logout、/skills、/mcp 的交互式选择与输入状态
 type OverlayState struct {
 	Kind        OverlayKind
 	Cursor      int
@@ -35,7 +38,42 @@ type OverlayState struct {
 	Providers   []auth.ProviderSpec
 	LoggedInIDs []string
 	Sessions    []storage.SessionSummary
-	StatusNote  string
+	Skills          []SkillStatusItem
+	MCPs            []MCPStatusItem
+	ThinkingLevel   string
+	ThinkingOptions []ai.ThinkingOption
+	StatusNote      string
+}
+
+func (o *OverlayState) syncThinkingOptionsForCursor(fallbackProvider, fallbackModel string) {
+	prov := fallbackProvider
+	model := fallbackModel
+	filtered := o.filteredModels()
+	if len(filtered) > 0 && o.Cursor >= 0 && o.Cursor < len(filtered) {
+		prov = filtered[o.Cursor].Provider
+		model = filtered[o.Cursor].FullName
+		if model == "" {
+			model = filtered[o.Cursor].ID
+		}
+	}
+	prof := ai.ResolveThinkingProfile(nil, prov, model)
+	o.ThinkingOptions = prof.Options
+}
+
+func cycleThinkingLevel(opts []ai.ThinkingOption, cur string, step int) string {
+	if len(opts) == 0 {
+		opts = ai.DefaultThinkingProfile().Options
+	}
+	norm := strings.ToLower(strings.TrimSpace(cur))
+	idx := 0
+	for i, opt := range opts {
+		if strings.ToLower(opt.ID) == norm {
+			idx = i
+			break
+		}
+	}
+	next := (idx + step + len(opts)) % len(opts)
+	return opts[next].ID
 }
 
 func (o *OverlayState) InitKeyInput() {
@@ -108,6 +146,25 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 		title = t.BoldFg(t.Accent, "Select Model")
 		searchRow := t.Fg(t.Muted, "Search: ") + t.Fg(t.Text, o.SearchQuery) + t.BoldFg(t.Accent, "▌")
 		lines = append(lines, ClipToWidth(searchRow, innerW, "…"))
+		var thinkPills []string
+		curThink := strings.ToLower(strings.TrimSpace(o.ThinkingLevel))
+		if curThink == "" {
+			curThink = "off"
+		}
+		opts := o.ThinkingOptions
+		if len(opts) == 0 {
+			opts = ai.DefaultThinkingProfile().Options
+		}
+		for _, opt := range opts {
+			lbl := opt.DisplayLabel()
+			if strings.ToLower(opt.ID) == curThink {
+				thinkPills = append(thinkPills, t.BoldFg(t.Warning, "["+lbl+"]"))
+			} else {
+				thinkPills = append(thinkPills, t.Fg(t.Muted, lbl))
+			}
+		}
+		thinkRow := t.Fg(t.Muted, "Thinking: ") + strings.Join(thinkPills, "  ") + t.Fg(t.Dim, "  (Tab / ←/→)")
+		lines = append(lines, ClipToWidth(thinkRow, innerW, "…"))
 		lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
 
 		filtered := o.filteredModels()
@@ -142,7 +199,7 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 			}
 		}
 		lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
-		lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Enter switch · Ctrl+S save default · Esc cancel · type to filter"))
+		lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Tab/←/→ think · Enter switch · Ctrl+S save · Esc cancel"))
 
 	case OverlayLoginSelect:
 		title = t.BoldFg(t.Accent, "Login Provider")
@@ -251,6 +308,12 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 		}
 		lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
 		lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Enter resume · Esc cancel · type to filter"))
+
+	case OverlaySkillsSelect:
+		title, lines = renderSkillsOverlayLines(o, innerW, t)
+
+	case OverlayMCPSelect:
+		title, lines = renderMCPOverlayLines(o, innerW, t)
 	}
 
 	padded := make([]string, len(lines))
@@ -276,17 +339,31 @@ func (m *MainUIModel) HandleOverlayKey(msg tea.KeyMsg) bool {
 	}
 
 	switch m.overlay.Kind {
+	case OverlaySkillsSelect:
+		return m.handleSkillsOverlayKey(msg)
+	case OverlayMCPSelect:
+		return m.handleMCPOverlayKey(msg)
 	case OverlayModelSelect:
 		filtered := m.overlay.filteredModels()
 		switch key {
 		case "up":
 			if m.overlay.Cursor > 0 {
 				m.overlay.Cursor--
+				m.overlay.syncThinkingOptionsForCursor(m.header.ProviderName, m.header.ModelName)
 			}
 		case "down":
 			if m.overlay.Cursor < len(filtered)-1 {
 				m.overlay.Cursor++
+				m.overlay.syncThinkingOptionsForCursor(m.header.ProviderName, m.header.ModelName)
 			}
+		case "tab", "right":
+			next := cycleThinkingLevel(m.overlay.ThinkingOptions, m.overlay.ThinkingLevel, 1)
+			m.overlay.ThinkingLevel = next
+			m.applyThinkingSelection(next)
+		case "shift+tab", "left":
+			next := cycleThinkingLevel(m.overlay.ThinkingOptions, m.overlay.ThinkingLevel, -1)
+			m.overlay.ThinkingLevel = next
+			m.applyThinkingSelection(next)
 		case "backspace":
 			rs := []rune(m.overlay.SearchQuery)
 			if len(rs) > 0 {
@@ -383,11 +460,21 @@ func (m *MainUIModel) HandleOverlayKey(msg tea.KeyMsg) bool {
 		case "up":
 			if m.overlay.Cursor > 0 {
 				m.overlay.Cursor--
+				m.overlay.syncThinkingOptionsForCursor(m.header.ProviderName, m.header.ModelName)
 			}
 		case "down":
 			if m.overlay.Cursor < len(filtered)-1 {
 				m.overlay.Cursor++
+				m.overlay.syncThinkingOptionsForCursor(m.header.ProviderName, m.header.ModelName)
 			}
+		case "tab", "right":
+			next := cycleThinkingLevel(m.overlay.ThinkingOptions, m.overlay.ThinkingLevel, 1)
+			m.overlay.ThinkingLevel = next
+			m.applyThinkingSelection(next)
+		case "shift+tab", "left":
+			next := cycleThinkingLevel(m.overlay.ThinkingOptions, m.overlay.ThinkingLevel, -1)
+			m.overlay.ThinkingLevel = next
+			m.applyThinkingSelection(next)
 		case "backspace":
 			rs := []rune(m.overlay.SearchQuery)
 			if len(rs) > 0 {

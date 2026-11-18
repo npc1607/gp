@@ -17,7 +17,9 @@ import (
 
 // Client MCP stdio 传输客户端
 type Client struct {
-	cmd       *exec.Cmd
+	ServerName string
+	ToolCount  int
+	cmd        *exec.Cmd
 	stdin     io.WriteCloser
 	stdout    io.Reader
 	closer    io.Closer

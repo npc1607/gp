@@ -61,7 +61,7 @@ func TestCLI_TC_CLI_01_ResumeCommandAndFlags(t *testing.T) {
 		{
 			name:          "resume_subcommand_defaults",
 			args:          []string{},
-			wantDB:        ".gp/gp.db",
+			wantDB:        defaultDBPath(),
 			wantModel:     "",
 			wantTools:     "",
 			wantSessionID: "",
@@ -79,7 +79,7 @@ func TestCLI_TC_CLI_01_ResumeCommandAndFlags(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			resumeCmd := flag.NewFlagSet("resume", flag.ContinueOnError)
-			resumeDB := resumeCmd.String("db", ".gp/gp.db", "SQLite 数据库路径")
+			resumeDB := resumeCmd.String("db", defaultDBPath(), "SQLite 数据库路径")
 			resumeModel := resumeCmd.String("model", "", "指定模型标识")
 			resumeTools := resumeCmd.String("tools", "", "工具白名单列表")
 

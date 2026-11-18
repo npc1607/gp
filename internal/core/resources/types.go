@@ -6,6 +6,8 @@ type Skill struct {
 	Description  string         `yaml:"description" json:"description"`
 	Instructions string         `yaml:"-" json:"instructions"`
 	Path         string         `yaml:"-" json:"path"`
+	Source       string         `yaml:"-" json:"source,omitempty"`
+	Enabled      bool           `yaml:"-" json:"enabled"`
 	Metadata     map[string]any `yaml:",inline" json:"metadata,omitempty"`
 }
 

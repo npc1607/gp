@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -105,10 +106,15 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		}
 	}
 
-	reg, err := r.resolveRegistry(cwd, cfg)
+	reg, activeClients, err := r.resolveRegistryWithClients(cwd, cfg)
 	if err != nil {
 		return fmt.Errorf("resolve registry: %w", err)
 	}
+	defer func() {
+		for _, c := range activeClients {
+			_ = c.Close()
+		}
+	}()
 
 	var p *tea.Program
 
@@ -199,8 +205,16 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 
 	ag := agent.NewAgent(tui.PrimaryAgentID, "orchestrator", prov, modelName, reg)
 	ag.SetCwd(cwd)
+	if cfg != nil && cfg.ThinkingLevel != "" {
+		ag.SetThinkingLevel(cfg.ThinkingLevel)
+	}
 
 	resLoader := resources.NewResourceLoader(cwd, homeDir)
+	if cfg != nil {
+		resLoader.SetExtraSkillDirs(cfg.SkillDirs)
+		resLoader.SetDisabledSkills(cfg.DisabledSkills)
+		resLoader.SetUnregisteredSkills(cfg.UnregisteredSkills)
+	}
 	sysPrompt := resLoader.BuildSystemPrompt(cfg.SystemPrompt)
 	if sysPrompt != "" {
 		ag.SetSystemPrompt(sysPrompt)
@@ -359,6 +373,103 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		}
 		return res.BeforeTokens, res.AfterTokens, nil
 	})
+	uiModel.SetResourceHandlers(tui.ResourceHandlers{
+		ListSkills: func() ([]tui.SkillStatusItem, error) {
+			skills, err := resLoader.LoadSkills()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]tui.SkillStatusItem, 0, len(skills))
+			for _, s := range skills {
+				out = append(out, tui.SkillStatusItem{
+					Name:        s.Name,
+					Description: s.Description,
+					Source:      s.Source,
+					Path:        s.Path,
+					Enabled:     s.Enabled,
+				})
+			}
+			return out, nil
+		},
+		ToggleSkill: func(name string, enable bool) error {
+			cfg.DisabledSkills = updateDisabledList(cfg.DisabledSkills, name, enable)
+			if enable {
+				cfg.UnregisteredSkills = updateDisabledList(cfg.UnregisteredSkills, name, true)
+				resLoader.SetUnregisteredSkills(cfg.UnregisteredSkills)
+			}
+			resLoader.SetDisabledSkills(cfg.DisabledSkills)
+			ag.SetSystemPrompt(resLoader.BuildSystemPrompt(cfg.SystemPrompt))
+			return settings.NewManager(cwd).SaveGlobal(*cfg)
+		},
+		AddSkillDir: func(dir string) error {
+			if !slices.Contains(cfg.SkillDirs, dir) {
+				cfg.SkillDirs = append(cfg.SkillDirs, dir)
+			}
+			resLoader.SetExtraSkillDirs(cfg.SkillDirs)
+			ag.SetSystemPrompt(resLoader.BuildSystemPrompt(cfg.SystemPrompt))
+			return settings.NewManager(cwd).SaveGlobal(*cfg)
+		},
+		UnregisterSkill: func(name string) error {
+			// 若该 Skill 来自自定义 SkillDirs，先移除对应目录；并记录到 UnregisteredSkills
+			if skills, err := resLoader.LoadSkills(); err == nil {
+				for _, s := range skills {
+					if strings.EqualFold(s.Name, strings.TrimSpace(name)) {
+						var keptDirs []string
+						for _, d := range cfg.SkillDirs {
+							if !strings.HasPrefix(s.Path, d) {
+								keptDirs = append(keptDirs, d)
+							}
+						}
+						cfg.SkillDirs = keptDirs
+						resLoader.SetExtraSkillDirs(cfg.SkillDirs)
+						break
+					}
+				}
+			}
+			cfg.UnregisteredSkills = updateDisabledList(cfg.UnregisteredSkills, name, false)
+			cfg.DisabledSkills = updateDisabledList(cfg.DisabledSkills, name, true)
+			resLoader.SetUnregisteredSkills(cfg.UnregisteredSkills)
+			resLoader.SetDisabledSkills(cfg.DisabledSkills)
+			ag.SetSystemPrompt(resLoader.BuildSystemPrompt(cfg.SystemPrompt))
+			return settings.NewManager(cwd).SaveGlobal(*cfg)
+		},
+		ListMCPs: func() ([]tui.MCPStatusItem, error) {
+			statuses, err := mcp.InspectServers(cwd, homeDir, cfg.DisabledMCPs, activeClients)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]tui.MCPStatusItem, 0, len(statuses))
+			for _, st := range statuses {
+				out = append(out, tui.MCPStatusItem{
+					Name:      st.Name,
+					Command:   st.Command,
+					Args:      st.Args,
+					Source:    st.Source,
+					Enabled:   st.Enabled,
+					Connected: st.Connected,
+					ToolCount: st.ToolCount,
+				})
+			}
+			return out, nil
+		},
+		ToggleMCP: func(name string, enable bool) error {
+			cfg.DisabledMCPs = updateDisabledList(cfg.DisabledMCPs, name, enable)
+			return settings.NewManager(cwd).SaveGlobal(*cfg)
+		},
+		UnregisterMCP: func(name string) error {
+			if err := mcp.RemoveServerConfig(cwd, homeDir, name); err != nil {
+				return err
+			}
+			cfg.DisabledMCPs = updateDisabledList(cfg.DisabledMCPs, name, true)
+			for _, c := range activeClients {
+				if c != nil && strings.EqualFold(c.ServerName, strings.TrimSpace(name)) {
+					_ = c.Close()
+					c.ServerName = ""
+				}
+			}
+			return settings.NewManager(cwd).SaveGlobal(*cfg)
+		},
+	})
 
 	// Headless 测试模式直接返回，避免在无终端环境阻塞 Program.Run
 	if r.opts.Headless {
@@ -388,6 +499,13 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			},
 		)
 	}
+	uiModel.SetThinkingChangeHandler(func(level string) error {
+		ag.SetThinkingLevel(level)
+		if cfg != nil {
+			cfg.ThinkingLevel = level
+		}
+		return nil
+	})
 	uiModel.SetModelChangeHandler(func(entry auth.ModelEntry, persist bool) error {
 		newKey, newURL, _, ok := authStore.ResolveCredential(entry.Provider)
 		if !ok {
@@ -424,6 +542,9 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 				globalCfg = settings.DefaultSettings()
 			}
 			globalCfg.Model = entry.ID
+			if cfg != nil && cfg.ThinkingLevel != "" {
+				globalCfg.ThinkingLevel = cfg.ThinkingLevel
+			}
 			if err := mgr.SaveGlobal(globalCfg); err != nil {
 				return fmt.Errorf("save default model: %w", err)
 			}
@@ -451,9 +572,14 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 }
 
 func (r *Runner) resolveRegistry(cwd string, cfg *settings.Settings) (*tools.Registry, error) {
+	reg, _, err := r.resolveRegistryWithClients(cwd, cfg)
+	return reg, err
+}
+
+func (r *Runner) resolveRegistryWithClients(cwd string, cfg *settings.Settings) (*tools.Registry, []*mcp.Client, error) {
 	reg, err := builtin.NewDefaultRegistry()
 	if err != nil {
-		return nil, fmt.Errorf("initialize builtin tools: %w", err)
+		return nil, nil, fmt.Errorf("initialize builtin tools: %w", err)
 	}
 
 	if len(r.opts.ToolAllowlist) == 0 && cfg != nil && len(cfg.DefaultTools) > 0 {
@@ -461,13 +587,32 @@ func (r *Runner) resolveRegistry(cwd string, cfg *settings.Settings) (*tools.Reg
 	}
 
 	homeDir, _ := os.UserHomeDir()
-	_, _ = mcp.AutoConnectAndRegister(context.Background(), cwd, homeDir, reg)
+	var disabledMCPs []string
+	if cfg != nil {
+		disabledMCPs = cfg.DisabledMCPs
+	}
+	clients, _ := mcp.AutoConnectAndRegisterWithDisabled(context.Background(), cwd, homeDir, reg, disabledMCPs)
 	_, _ = js.LoadExtensions(cwd, homeDir, reg)
 
 	if len(r.opts.ToolAllowlist) > 0 {
 		reg = reg.ScopedRegistry(r.opts.ToolAllowlist)
 	}
-	return reg, nil
+	return reg, clients, nil
+}
+
+func updateDisabledList(list []string, name string, enable bool) []string {
+	target := strings.ToLower(strings.TrimSpace(name))
+	var out []string
+	for _, item := range list {
+		if strings.ToLower(strings.TrimSpace(item)) == target {
+			continue
+		}
+		out = append(out, item)
+	}
+	if !enable && target != "" {
+		out = append(out, strings.TrimSpace(name))
+	}
+	return out
 }
 
 func (r *Runner) resolveSettings(cwd string) *settings.Settings {

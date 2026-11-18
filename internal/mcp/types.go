@@ -89,10 +89,22 @@ type CallToolResult struct {
 
 // ServerConfig 单个 MCP Server 配置
 type ServerConfig struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Cwd     string            `json:"cwd,omitempty"`
+	Command  string            `json:"command"`
+	Args     []string          `json:"args,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	Cwd      string            `json:"cwd,omitempty"`
+	Disabled bool              `json:"disabled,omitempty"`
+}
+
+// ServerStatus 描述单个 MCP Server 的配置、启用与运行态连接状态
+type ServerStatus struct {
+	Name      string
+	Command   string
+	Args      []string
+	Source    string // "global" | "project"
+	Enabled   bool
+	Connected bool
+	ToolCount int
 }
 
 // Config mcp.json 配置文件定义

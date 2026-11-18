@@ -21,11 +21,19 @@ import (
 	_ "gp/plugins/qoder"   // 挂载 Qoder Provider 插件
 )
 
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(".gp", "gp.db")
+	}
+	return filepath.Join(home, ".gp", "gp.db")
+}
+
 var (
 	flagMode    = flag.String("mode", "interactive", "运行模式: interactive, print, json, rpc, resume")
 	flagPrint   = flag.Bool("p", false, "快捷单次输出模式 (等同于 --mode print)")
 	flagResume  = flag.Bool("resume", false, "断点恢复最近中断的任务 (等同于 resume 子命令)")
-	flagDB      = flag.String("db", ".gp/gp.db", "SQLite 数据库路径")
+	flagDB      = flag.String("db", defaultDBPath(), "SQLite 数据库路径")
 	flagModel   = flag.String("model", "", "指定模型标识 (如 antigravity/gemini-4-argon)")
 	flagTools   = flag.String("tools", "", "工具白名单列表 (逗号分隔)")
 	flagDebug   = flag.Bool("debug", false, "启用调试日志输出到 ./logs 目录")
@@ -75,7 +83,7 @@ func main() {
 	// 1. 处理 resume 子命令 (如: gp resume [session_id] [-db ...] [-model ...] [-tools ...])
 	if len(os.Args) > 1 && os.Args[1] == "resume" {
 		resumeCmd := flag.NewFlagSet("resume", flag.ExitOnError)
-		resumeDB := resumeCmd.String("db", ".gp/gp.db", "SQLite 数据库路径")
+		resumeDB := resumeCmd.String("db", defaultDBPath(), "SQLite 数据库路径")
 		resumeModel := resumeCmd.String("model", "", "指定模型标识")
 		resumeTools := resumeCmd.String("tools", "", "工具白名单列表")
 		_ = resumeCmd.Parse(os.Args[2:])

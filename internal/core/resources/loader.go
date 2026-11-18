@@ -12,15 +12,45 @@ import (
 
 // ResourceLoader 负责扫描加载 Skills、AGENTS.md、CLAUDE.md 等工程上下文资源
 type ResourceLoader struct {
-	cwd     string
-	homeDir string
+	cwd                string
+	homeDir            string
+	extraSkillDirs     []string
+	disabledSkills     map[string]bool
+	unregisteredSkills map[string]bool
 }
 
 // NewResourceLoader 构造资源加载器
 func NewResourceLoader(cwd, homeDir string) *ResourceLoader {
 	return &ResourceLoader{
-		cwd:     cwd,
-		homeDir: homeDir,
+		cwd:                cwd,
+		homeDir:            homeDir,
+		disabledSkills:     make(map[string]bool),
+		unregisteredSkills: make(map[string]bool),
+	}
+}
+
+// SetExtraSkillDirs 配置额外的自定义 Skill 扫描目录
+func (r *ResourceLoader) SetExtraSkillDirs(dirs []string) {
+	r.extraSkillDirs = append([]string(nil), dirs...)
+}
+
+// SetDisabledSkills 配置被禁用的 Skill 名称列表（大小写不敏感）
+func (r *ResourceLoader) SetDisabledSkills(names []string) {
+	r.disabledSkills = make(map[string]bool, len(names))
+	for _, n := range names {
+		if k := strings.ToLower(strings.TrimSpace(n)); k != "" {
+			r.disabledSkills[k] = true
+		}
+	}
+}
+
+// SetUnregisteredSkills 配置已取消注册的 Skill 名称列表（从展示与加载中排除）
+func (r *ResourceLoader) SetUnregisteredSkills(names []string) {
+	r.unregisteredSkills = make(map[string]bool, len(names))
+	for _, n := range names {
+		if k := strings.ToLower(strings.TrimSpace(n)); k != "" {
+			r.unregisteredSkills[k] = true
+		}
 	}
 }
 
@@ -77,20 +107,33 @@ func ParseSkillFile(filePath string) (*Skill, error) {
 func (r *ResourceLoader) LoadSkills() ([]Skill, error) {
 	skillsMap := make(map[string]Skill)
 
-	// 1. 扫描全局技能
+	// 1. 扫描全局技能 (~/.gp/skills, ~/.agents/skills)
 	if r.homeDir != "" {
-		globalDir := filepath.Join(r.homeDir, ".gp", "skills")
-		r.scanSkillsDir(globalDir, skillsMap)
+		r.scanSkillsDir(filepath.Join(r.homeDir, ".gp", "skills"), "global", skillsMap)
+		r.scanSkillsDir(filepath.Join(r.homeDir, ".agents", "skills"), "global", skillsMap)
 	}
 
 	// 2. 扫描项目级技能 (覆盖同名全局技能)
 	if r.cwd != "" {
-		r.scanSkillsDir(filepath.Join(r.cwd, ".gp", "skills"), skillsMap)
-		r.scanSkillsDir(filepath.Join(r.cwd, "skills"), skillsMap)
+		r.scanSkillsDir(filepath.Join(r.cwd, ".gp", "skills"), "project", skillsMap)
+		r.scanSkillsDir(filepath.Join(r.cwd, ".agents", "skills"), "project", skillsMap)
+		r.scanSkillsDir(filepath.Join(r.cwd, "skills"), "project", skillsMap)
+	}
+
+	// 3. 扫描用户配置的额外技能目录
+	for _, dir := range r.extraSkillDirs {
+		if strings.TrimSpace(dir) != "" {
+			r.scanSkillsDir(dir, "custom", skillsMap)
+		}
 	}
 
 	var result []Skill
 	for _, s := range skillsMap {
+		key := strings.ToLower(strings.TrimSpace(s.Name))
+		if r.unregisteredSkills[key] {
+			continue
+		}
+		s.Enabled = !r.disabledSkills[key]
 		result = append(result, s)
 	}
 
@@ -101,7 +144,7 @@ func (r *ResourceLoader) LoadSkills() ([]Skill, error) {
 	return result, nil
 }
 
-func (r *ResourceLoader) scanSkillsDir(dir string, targetMap map[string]Skill) {
+func (r *ResourceLoader) scanSkillsDir(dir, source string, targetMap map[string]Skill) {
 	if _, err := os.Stat(dir); err != nil {
 		return
 	}
@@ -118,6 +161,7 @@ func (r *ResourceLoader) scanSkillsDir(dir string, targetMap map[string]Skill) {
 		if lowerName == "skill.md" || strings.HasSuffix(lowerName, ".md") {
 			skill, parseErr := ParseSkillFile(path)
 			if parseErr == nil && skill != nil && skill.Name != "" && !strings.EqualFold(skill.Name, "readme") {
+				skill.Source = source
 				targetMap[skill.Name] = *skill
 			}
 		}
@@ -176,15 +220,23 @@ func (r *ResourceLoader) BuildSystemPrompt(basePrompt string) string {
 		}
 
 		if len(ctx.Skills) > 0 {
-			sb.WriteString("# Available Domain Skills\n\n")
+			var enabledSkills []Skill
 			for _, s := range ctx.Skills {
-				fmt.Fprintf(&sb, "## Skill: %s\n", s.Name)
-				if s.Description != "" {
-					fmt.Fprintf(&sb, "**Description**: %s\n\n", s.Description)
+				if s.Enabled {
+					enabledSkills = append(enabledSkills, s)
 				}
-				if s.Instructions != "" {
-					sb.WriteString(s.Instructions)
-					sb.WriteString("\n\n")
+			}
+			if len(enabledSkills) > 0 {
+				sb.WriteString("# Available Domain Skills\n\n")
+				for _, s := range enabledSkills {
+					fmt.Fprintf(&sb, "## Skill: %s\n", s.Name)
+					if s.Description != "" {
+						fmt.Fprintf(&sb, "**Description**: %s\n\n", s.Description)
+					}
+					if s.Instructions != "" {
+						sb.WriteString(s.Instructions)
+						sb.WriteString("\n\n")
+					}
 				}
 			}
 		}
