@@ -18,6 +18,7 @@ import (
 	"gp/internal/core/storage/sqlite"
 	"gp/internal/extensions/js"
 	"gp/internal/mcp"
+	"gp/internal/modes/subagent"
 	"gp/internal/tools"
 	"gp/internal/tools/builtin"
 	"time"
@@ -102,7 +103,7 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 	}
 
 	// 接线真实子 Agent 执行器，避免 subagent 工具退化为空回执 stub
-	if err := builtin.WireSubagentRunner(reg, prov, modelName, cwd); err != nil {
+	if err := subagent.WireRunner(reg, prov, modelName, cwd); err != nil {
 		_ = err // 子 Agent 不可用时降级为内置 stub，不阻塞主流程
 	}
 
@@ -164,16 +165,16 @@ func (r *Runner) resolveRegistry(cwd string, cfg *settings.Settings) (*tools.Reg
 		return nil, fmt.Errorf("initialize builtin tools: %w", err)
 	}
 
+	if len(r.opts.ToolAllowlist) == 0 && cfg != nil && len(cfg.DefaultTools) > 0 {
+		reg = reg.ScopedRegistry(cfg.DefaultTools)
+	}
+
 	homeDir, _ := os.UserHomeDir()
 	_, _ = mcp.AutoConnectAndRegister(context.Background(), cwd, homeDir, reg)
 	_, _ = js.LoadExtensions(cwd, homeDir, reg)
 
-	allowlist := r.opts.ToolAllowlist
-	if len(allowlist) == 0 && cfg != nil && len(cfg.DefaultTools) > 0 {
-		allowlist = cfg.DefaultTools
-	}
-	if len(allowlist) > 0 {
-		reg = reg.ScopedRegistry(allowlist)
+	if len(r.opts.ToolAllowlist) > 0 {
+		reg = reg.ScopedRegistry(r.opts.ToolAllowlist)
 	}
 	return reg, nil
 }

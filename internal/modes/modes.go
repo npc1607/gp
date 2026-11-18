@@ -15,6 +15,7 @@ import (
 	"gp/internal/mcp"
 	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
+	"gp/internal/modes/subagent"
 	"gp/internal/tools/builtin"
 )
 
@@ -138,7 +139,7 @@ func (r *ResumeRunner) Run(ctx context.Context, _ string) error {
 	}
 
 	// 接线真实子 Agent 执行器，避免 subagent 工具退化为空回执 stub
-	if err := builtin.WireSubagentRunner(reg, prov, modelName, cwd); err != nil {
+	if err := subagent.WireRunner(reg, prov, modelName, cwd); err != nil {
 		_ = err
 	}
 

@@ -75,6 +75,14 @@ func (m *WorkflowTreeModel) MarkStopped() {
 	}
 }
 
+// Reset 清空上一轮的 DAG 节点与计时状态
+func (m *WorkflowTreeModel) Reset() {
+	m.nodes = make(map[string]*DAGNodeItem)
+	m.nodeOrder = nil
+	m.startTime = time.Time{}
+	m.endTime = time.Time{}
+}
+
 // AddOrUpdateNode 插入或更新 DAG 节点状态
 func (m *WorkflowTreeModel) AddOrUpdateNode(msg DAGNodeStatusMsg) {
 	node, exists := m.nodes[msg.NodeID]

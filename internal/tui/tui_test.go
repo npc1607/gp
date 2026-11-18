@@ -954,3 +954,60 @@ func TestTUI_ResumeCommandAndOverlay(t *testing.T) {
 		t.Fatalf("expected restored conversation rendered in transcript, got:\n%s", resumedView)
 	}
 }
+
+func TestTUI_ResetSubagentViewsOnNextPrompt(t *testing.T) {
+	var submitted []string
+	m := createTestMainUIModel(t, func(prompt string) {
+		submitted = append(submitted, prompt)
+	})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 35})
+
+	// Simulate previous turn with subagent tab, DAG tree, and active DAG view
+	_, _ = m.Update(AgentFlowMsg{
+		ParentID:  PrimaryAgentID,
+		ChildID:   "sub_impl_1",
+		Role:      "implementer",
+		Direction: "dispatch",
+		Payload:   "scan repo",
+	})
+	_, _ = m.Update(AgentFlowMsg{
+		ParentID:  PrimaryAgentID,
+		ChildID:   "sub_impl_1",
+		Role:      "implementer",
+		Direction: "return",
+		Payload:   "done",
+	})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+
+	if len(m.tabIDs) != 2 || m.activeTabID != "sub_impl_1" || !m.showDAG || len(m.workflowTree.nodes) == 0 {
+		t.Fatalf("precondition failed: tabs=%v active=%s showDAG=%v nodes=%d", m.tabIDs, m.activeTabID, m.showDAG, len(m.workflowTree.nodes))
+	}
+
+	// Next conversation turn starts via Enter
+	m.inputArea.SetValue("next question")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(submitted) != 1 || submitted[0] != "next question" {
+		t.Fatalf("expected prompt submitted, got %v", submitted)
+	}
+	if m.activeTabID != PrimaryAgentID {
+		t.Fatalf("expected activeTabID reset to %s, got %s", PrimaryAgentID, m.activeTabID)
+	}
+	if len(m.tabIDs) != 1 || m.tabIDs[0] != PrimaryAgentID {
+		t.Fatalf("expected tabIDs reset to [%s], got %v", PrimaryAgentID, m.tabIDs)
+	}
+	if _, exists := m.agentBuffers["sub_impl_1"]; exists {
+		t.Fatalf("expected subagent buffer sub_impl_1 to be removed")
+	}
+	if m.showDAG {
+		t.Fatalf("expected showDAG reset to false")
+	}
+	if len(m.workflowTree.nodes) != 0 || len(m.tray.order) != 0 {
+		t.Fatalf("expected workflowTree and tray reset, got nodes=%d tray=%d", len(m.workflowTree.nodes), len(m.tray.order))
+	}
+	view := m.View()
+	if strings.Contains(view, "2:implementer") || strings.Contains(view, "Tab switch") {
+		t.Fatalf("expected subagent tab bar cleared in View, got:\n%s", view)
+	}
+}

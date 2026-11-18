@@ -32,7 +32,15 @@ type Client struct {
 
 // NewStdioClient 启动子进程并建立 stdio JSON-RPC 通信客户端
 func NewStdioClient(ctx context.Context, command string, args []string, env map[string]string) (*Client, error) {
+	return NewStdioClientWithDir(ctx, command, args, env, "")
+}
+
+// NewStdioClientWithDir 启动子进程并建立 stdio JSON-RPC 通信客户端（可指定工作目录）
+func NewStdioClientWithDir(ctx context.Context, command string, args []string, env map[string]string, dir string) (*Client, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 
 	// 注入环境变量
 	if len(env) > 0 {

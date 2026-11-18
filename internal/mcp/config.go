@@ -86,7 +86,11 @@ func AutoConnectAndRegister(ctx context.Context, cwd, homeDir string, reg *tools
 			continue
 		}
 
-		client, err := NewStdioClient(ctx, srv.Command, srv.Args, srv.Env)
+		dir := srv.Cwd
+		if dir == "" {
+			dir = cwd
+		}
+		client, err := NewStdioClientWithDir(ctx, srv.Command, srv.Args, srv.Env, dir)
 		if err != nil {
 			// 忽略启动失败的单个 MCP 外部服务，保障核心 Agent 正常运行
 			continue

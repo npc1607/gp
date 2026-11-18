@@ -83,7 +83,7 @@ func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *
 		toolReg:     reg,
 		provider:    provider,
 		modelName:   modelName,
-		maxTurns:    50,
+		maxTurns:    500,
 	}
 	a.status.Store(&initialStatus)
 	return a

@@ -92,7 +92,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 	maxTurns := a.GetMaxTurns()
 	if maxTurns <= 0 {
-		maxTurns = 50
+		maxTurns = 500
 	}
 
 	runStart := time.Now()

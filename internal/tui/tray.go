@@ -32,6 +32,12 @@ type ActiveTrayModel struct {
 	spinner    spinner.Model
 }
 
+// Reset 清空上一轮的子协程托盘状态
+func (m *ActiveTrayModel) Reset() {
+	m.coroutines = make(map[string]*ActiveCoroutineItem)
+	m.order = nil
+}
+
 // NewActiveTrayModel 创建动态任务托盘模型
 func NewActiveTrayModel() *ActiveTrayModel {
 	sp := spinner.New()

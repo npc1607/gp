@@ -1,4 +1,4 @@
-package builtin
+package subagent
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"gp/internal/ai"
 	"gp/internal/core/session"
 	"gp/internal/tools"
+	"gp/internal/tools/builtin"
 )
 
 // roleSystemPrompts 各工种子 Agent 的角色系统提示词
@@ -34,8 +35,8 @@ func resolveRolePrompt(role string) string {
 	return defaultRoleSystemPrompt
 }
 
-// SubagentEvent 描述子 Agent 生命周期与数据流事件（派发输入与返回输出）
-type SubagentEvent struct {
+// Event 描述子 Agent 生命周期与数据流事件（派发输入与返回输出）
+type Event struct {
 	Type       string // "start" | "end"
 	ChildID    string
 	Role       string
@@ -45,23 +46,23 @@ type SubagentEvent struct {
 	Duration   time.Duration
 }
 
-// SubagentHooks 允许宿主（如交互式 TUI）观测子 Agent 的实时流、事件与数据流
-type SubagentHooks struct {
-	OnLifecycle  func(ev SubagentEvent)
+// Hooks 允许宿主（如交互式 TUI）观测子 Agent 的实时流、事件与数据流
+type Hooks struct {
+	OnLifecycle  func(ev Event)
 	OnStream     func(agentID string, chunk ai.StreamChunk)
 	OnAgentEvent func(ev agent.AgentEvent)
 }
 
-// WireSubagentRunner 为注册中心里的 subagent 工具注入真实的子 Agent 执行器。
+// WireRunner 为注册中心里的 subagent 工具注入真实的子 Agent 执行器。
 //
 // 未接线时 SubagentTool 会退化为直连 stub，只回显 "Completed task: ..." 而不真正调用模型，
 // 导致主 Agent 拿到一堆空回执。此处将 runner 指向 agent.RunLoop 驱动的真实子 Agent 协程。
-func WireSubagentRunner(reg *tools.Registry, prov ai.Provider, modelName, cwd string) error {
-	return WireSubagentRunnerWithHooks(reg, prov, modelName, cwd, SubagentHooks{})
+func WireRunner(reg *tools.Registry, prov ai.Provider, modelName, cwd string) error {
+	return WireRunnerWithHooks(reg, prov, modelName, cwd, Hooks{})
 }
 
-// WireSubagentRunnerWithHooks 注入真实子 Agent 执行器，并挂载可观测回调以追踪子 Agent 状态与数据流
-func WireSubagentRunnerWithHooks(reg *tools.Registry, prov ai.Provider, modelName, cwd string, hooks SubagentHooks) error {
+// WireRunnerWithHooks 注入真实子 Agent 执行器，并挂载可观测回调以追踪子 Agent 状态与数据流
+func WireRunnerWithHooks(reg *tools.Registry, prov ai.Provider, modelName, cwd string, hooks Hooks) error {
 	if reg == nil {
 		return fmt.Errorf("wire subagent runner: registry is nil")
 	}
@@ -72,7 +73,7 @@ func WireSubagentRunnerWithHooks(reg *tools.Registry, prov ai.Provider, modelNam
 	if !ok {
 		return fmt.Errorf("wire subagent runner: tool %q not registered", "subagent")
 	}
-	sub, ok := tool.(*SubagentTool)
+	sub, ok := tool.(*builtin.SubagentTool)
 	if !ok {
 		return fmt.Errorf("wire subagent runner: tool %q has unexpected type %T", "subagent", tool)
 	}
@@ -127,7 +128,7 @@ func WireSubagentRunnerWithHooks(reg *tools.Registry, prov ai.Provider, modelNam
 
 		start := time.Now()
 		if hooks.OnLifecycle != nil {
-			hooks.OnLifecycle(SubagentEvent{
+			hooks.OnLifecycle(Event{
 				Type:       "start",
 				ChildID:    childID,
 				Role:       role,
@@ -142,7 +143,7 @@ func WireSubagentRunnerWithHooks(reg *tools.Registry, prov ai.Provider, modelNam
 		}
 
 		if hooks.OnLifecycle != nil {
-			hooks.OnLifecycle(SubagentEvent{
+			hooks.OnLifecycle(Event{
 				Type:       "end",
 				ChildID:    childID,
 				Role:       role,

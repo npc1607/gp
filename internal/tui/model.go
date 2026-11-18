@@ -443,14 +443,7 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.handleLocalCommand(val) {
 					return m, nil
 				}
-				if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-					activeBuf.RawTextBuffer += "\n[User]: " + val + "\n\n"
-					activeBuf.Transcript.AddUserMessage(val, time.Now())
-					activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
-				}
-				if m.onUserSubmit != nil {
-					m.onUserSubmit(val)
-				}
+				m.submitUserPrompt(val)
 			}
 			return m, nil
 		case "up":
@@ -673,14 +666,7 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case UserSubmitPromptMsg:
 			if specMsg.Prompt != "" {
-				if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-					activeBuf.RawTextBuffer += "\n[User]: " + specMsg.Prompt + "\n\n"
-					activeBuf.Transcript.AddUserMessage(specMsg.Prompt, time.Now())
-					activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
-				}
-				if m.onUserSubmit != nil {
-					m.onUserSubmit(specMsg.Prompt)
-				}
+				m.submitUserPrompt(specMsg.Prompt)
 			}
 			return m, tea.Batch(cmds...)
 
@@ -960,6 +946,37 @@ func (m *MainUIModel) applyModelSelection(entry auth.ModelEntry, persist bool) {
 	}
 }
 
+// resetSubagentViews 清理上一轮对话产生的子 Agent Tab、DAG 拓扑树及托盘状态，恢复主视图显示
+func (m *MainUIModel) resetSubagentViews() {
+	hadSubagents := len(m.tabIDs) > 1 || m.showDAG || len(m.workflowTree.nodes) > 0
+	m.activeTabID = PrimaryAgentID
+	m.tabIDs = []string{PrimaryAgentID}
+	for id := range m.agentBuffers {
+		if id != PrimaryAgentID {
+			delete(m.agentBuffers, id)
+		}
+	}
+	m.showDAG = false
+	m.workflowTree.Reset()
+	m.tray.Reset()
+	if hadSubagents {
+		m.resizeAllBuffers()
+	}
+}
+
+// submitUserPrompt 重置上一轮子 Agent 视图状态并向主 Agent 提交新一轮用户输入
+func (m *MainUIModel) submitUserPrompt(prompt string) {
+	m.resetSubagentViews()
+	if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
+		activeBuf.RawTextBuffer += "\n[User]: " + prompt + "\n\n"
+		activeBuf.Transcript.AddUserMessage(prompt, time.Now())
+		activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+	}
+	if m.onUserSubmit != nil {
+		m.onUserSubmit(prompt)
+	}
+}
+
 func (m *MainUIModel) applyResumeSession(sessionID string) {
 	if m.onResumeSession == nil {
 		return
@@ -970,8 +987,7 @@ func (m *MainUIModel) applyResumeSession(sessionID string) {
 		return
 	}
 	m.header.SessionID = sessionID
-	m.activeTabID = PrimaryAgentID
-	m.tabIDs = []string{PrimaryAgentID}
+	m.resetSubagentViews()
 
 	buf := m.EnsureAgentBuffer(PrimaryAgentID, "Orchestrator")
 	buf.RawTextBuffer = ""
