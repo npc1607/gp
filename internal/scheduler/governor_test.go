@@ -22,17 +22,15 @@ func TestGovernor_TC_GOV_01_ConcurrencySemaphore(t *testing.T) {
 
 	gov := NewGovernor(maxConcurrency, 100000)
 
-	var currentActive int64
+	var currentActive atomic.Int64
 	var maxObservedActive int64
 	var completed int64
 	var wg sync.WaitGroup
 
-	for i := 0; i < totalTasks; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range totalTasks {
+		wg.Go(func() {
 			err := gov.ExecuteSubagent(context.Background(), func(ctx context.Context) error {
-				curr := atomic.AddInt64(&currentActive, 1)
+				curr := currentActive.Add(1)
 				for {
 					max := atomic.LoadInt64(&maxObservedActive)
 					if curr > max {
@@ -45,14 +43,14 @@ func TestGovernor_TC_GOV_01_ConcurrencySemaphore(t *testing.T) {
 				}
 
 				time.Sleep(15 * time.Millisecond)
-				atomic.AddInt64(&currentActive, -1)
+				currentActive.Add(-1)
 				atomic.AddInt64(&completed, 1)
 				return nil
 			})
 			if err != nil {
 				t.Errorf("%s(inputs=%+v): got unexpected task error %v, want nil", fn, inputs, err)
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -155,7 +153,7 @@ func TestGovernor_SlidingWindowLimiting(t *testing.T) {
 	gov := NewGovernorWithWindow(10, limit, window)
 
 	start := time.Now()
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		err := gov.ExecuteWithTokens(context.Background(), 1, func(ctx context.Context) error {
 			return nil
 		})
@@ -186,16 +184,14 @@ func TestGovernor_StatsObservability(t *testing.T) {
 	gov := NewGovernor(5, 50000)
 	var wg sync.WaitGroup
 
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 20 {
+		wg.Go(func() {
 			_ = gov.ExecuteSubagent(context.Background(), func(ctx context.Context) error {
 				_ = gov.Stats()
 				time.Sleep(5 * time.Millisecond)
 				return nil
 			})
-		}()
+		})
 	}
 
 	wg.Wait()

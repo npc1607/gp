@@ -161,8 +161,8 @@ func (r *ReadTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*to
 
 	// Add notice if truncated or partial
 	if truncated || lastLineRendered < totalLines {
-		sb.WriteString(fmt.Sprintf("\n[Showing lines %d-%d of %d. Use offset=%d to continue.]\n",
-			startLine, lastLineRendered, totalLines, lastLineRendered+1))
+		fmt.Fprintf(&sb, "\n[Showing lines %d-%d of %d. Use offset=%d to continue.]\n",
+			startLine, lastLineRendered, totalLines, lastLineRendered+1)
 	}
 
 	return &tools.ToolResult{

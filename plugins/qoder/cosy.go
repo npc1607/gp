@@ -37,7 +37,7 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 var serverPub *rsa.PublicKey
 
 func init() {
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		stdToCustom[stdAlphabet[i]] = customAlphabet[i]
 		customToStd[customAlphabet[i]] = stdAlphabet[i]
 	}
@@ -90,6 +90,7 @@ func DecodeBody(encoded string) ([]byte, error) {
 }
 
 func encryptAESKey(tempKey []byte) (string, error) {
+	//nolint:staticcheck // upstream Qoder handshake requires RSA PKCS1v15
 	c, err := rsa.EncryptPKCS1v15(rand.Reader, serverPub, tempKey)
 	if err != nil {
 		return "", err
@@ -214,9 +215,7 @@ func (s *cosySession) Headers(body, rawURL, modelKey string) map[string]string {
 	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
 		path = u.Path
 	}
-	if strings.HasPrefix(path, "/algo") {
-		path = path[len("/algo"):]
-	}
+	path = strings.TrimPrefix(path, "/algo")
 	payload := map[string]string{
 		"cosyVersion": "1.1.75",
 		"ideVersion":  "",

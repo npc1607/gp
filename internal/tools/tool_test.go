@@ -67,7 +67,6 @@ func TestReplayPolicyResolution(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			got := tools.GetReplayMode(tc.input)
 			if got != tc.wantOutput {

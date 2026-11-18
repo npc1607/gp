@@ -61,7 +61,7 @@ func main() {
 
 		var allowlist []string
 		if *resumeTools != "" {
-			for _, t := range strings.Split(*resumeTools, ",") {
+			for t := range strings.SplitSeq(*resumeTools, ",") {
 				if trimmed := strings.TrimSpace(t); trimmed != "" {
 					allowlist = append(allowlist, trimmed)
 				}
@@ -116,7 +116,7 @@ func main() {
 
 	var allowlist []string
 	if *flagTools != "" {
-		for _, t := range strings.Split(*flagTools, ",") {
+		for t := range strings.SplitSeq(*flagTools, ",") {
 			if trimmed := strings.TrimSpace(t); trimmed != "" {
 				allowlist = append(allowlist, trimmed)
 			}

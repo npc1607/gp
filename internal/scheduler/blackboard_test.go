@@ -13,8 +13,7 @@ import (
 func TestBlackboard_TC_BB_01_WatchAndWildcardDispatch(t *testing.T) {
 	fn := "Blackboard.Watch"
 	bb := NewBlackboard()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	inputs := map[string]string{
 		"targetKey": "k1",
@@ -202,7 +201,7 @@ func TestBlackboard_CRUDAndConcurrency(t *testing.T) {
 	bb := NewBlackboard()
 	var wg sync.WaitGroup
 
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()

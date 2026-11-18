@@ -115,8 +115,8 @@ func NewStore(homeDir string) *Store {
 func NewStoreWithPath(path string) *Store {
 	dbPath := path
 	jsonPath := ""
-	if strings.HasSuffix(path, ".json") {
-		dbPath = strings.TrimSuffix(path, ".json") + ".db"
+	if before, ok := strings.CutSuffix(path, ".json"); ok {
+		dbPath = before + ".db"
 		jsonPath = path
 	}
 	return &Store{

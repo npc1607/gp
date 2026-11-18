@@ -138,7 +138,7 @@ func TestMemoryStorage_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 40)
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		wg.Add(1)
 		idx := i
 		go func() {

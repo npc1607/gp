@@ -56,10 +56,7 @@ func RenderCompletionMenu(matches []SlashCommand, cursor int, width int, t Theme
 	if cursor >= maxShow {
 		start = cursor - maxShow + 1
 	}
-	end := start + maxShow
-	if end > len(matches) {
-		end = len(matches)
-	}
+	end := min(start+maxShow, len(matches))
 
 	var rows []string
 	for i := start; i < end; i++ {

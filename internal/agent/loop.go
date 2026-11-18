@@ -316,7 +316,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 				return "", err
 			}
 
-			var replayMode tools.ReplayMode = tools.ReplayInterrupt
+			replayMode := tools.ReplayInterrupt
 			var targetTool tools.Tool
 			if a.toolReg != nil {
 				if t, ok := a.toolReg.Get(call.Function.Name); ok {

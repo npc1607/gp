@@ -105,10 +105,7 @@ func RenderEditor(
 	botBorder := t.Fg(t.BorderMuted, strings.Repeat("─", width))
 
 	// 输入行内容（直接使用 textinput.View()，完整支持左右移动光标、Ctrl+W/Alt+Backspace 删词及长文本水平滚动）
-	input.Width = innerW - 2
-	if input.Width < 8 {
-		input.Width = 8
-	}
+	input.Width = max(innerW-2, 8)
 	inputLine := ClipToWidth(input.View(), innerW, "")
 
 	// 元数据行: <provider-icon> <model>  <thinking>        <rightHint>
@@ -184,10 +181,7 @@ func composeLeftRight(left, right string, width int) string {
 	}
 	lw := width - rw - 1
 	clippedLeft := ClipToWidth(left, lw, "…")
-	gap := width - VisibleWidth(clippedLeft) - rw
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(width-VisibleWidth(clippedLeft)-rw, 1)
 	return clippedLeft + strings.Repeat(" ", gap) + right
 }
 

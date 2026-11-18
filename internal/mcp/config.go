@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 
@@ -41,9 +42,7 @@ func DiscoverConfig(cwd, homeDir string) (*Config, error) {
 			return nil, err
 		}
 		if globalCfg != nil {
-			for k, v := range globalCfg.GetServers() {
-				merged.MCPServers[k] = v
-			}
+			maps.Copy(merged.MCPServers, globalCfg.GetServers())
 		}
 	}
 
@@ -55,9 +54,7 @@ func DiscoverConfig(cwd, homeDir string) (*Config, error) {
 			return nil, err
 		}
 		if localCfg != nil {
-			for k, v := range localCfg.GetServers() {
-				merged.MCPServers[k] = v
-			}
+			maps.Copy(merged.MCPServers, localCfg.GetServers())
 		}
 	}
 

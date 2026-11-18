@@ -223,15 +223,15 @@ func TestSubagentTool_ConcurrentExecution(t *testing.T) {
 	}
 
 	gov := scheduler.NewGovernor(10, 100000)
-	var activeSubagents int64
-	var maxActive int64
+	var activeSubagents atomic.Int64
+	var maxActive atomic.Int64
 
 	runner := func(ctx context.Context, role, taskPrompt string, st *session.SessionTree, reg *tools.Registry) (string, error) {
-		curr := atomic.AddInt64(&activeSubagents, 1)
+		curr := activeSubagents.Add(1)
 		for {
-			max := atomic.LoadInt64(&maxActive)
+			max := maxActive.Load()
 			if curr > max {
-				if atomic.CompareAndSwapInt64(&maxActive, max, curr) {
+				if maxActive.CompareAndSwap(max, curr) {
 					break
 				}
 			} else {
@@ -239,7 +239,7 @@ func TestSubagentTool_ConcurrentExecution(t *testing.T) {
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
-		atomic.AddInt64(&activeSubagents, -1)
+		activeSubagents.Add(-1)
 
 		if st == nil {
 			return "", errors.New("missing session tree")

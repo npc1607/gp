@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 )
 
 // Request JSON-RPC 2.0 请求/通知结构体
@@ -106,11 +107,7 @@ func (c *Config) GetServers() map[string]ServerConfig {
 	if c == nil {
 		return res
 	}
-	for k, v := range c.MCPServers {
-		res[k] = v
-	}
-	for k, v := range c.Servers {
-		res[k] = v
-	}
+	maps.Copy(res, c.MCPServers)
+	maps.Copy(res, c.Servers)
 	return res
 }

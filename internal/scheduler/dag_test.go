@@ -43,8 +43,8 @@ func TestDAGScheduler_TC_DAG_02_FanOutFanIn(t *testing.T) {
 	bb := NewBlackboard()
 	sched := NewDAGScheduler(gov, bb)
 
-	var activeBranch int64
-	var maxActiveBranch int64
+	var activeBranch atomic.Int64
+	var maxActiveBranch atomic.Int64
 
 	rootNode := &TaskNode{
 		ID:        "root",
@@ -59,11 +59,11 @@ func TestDAGScheduler_TC_DAG_02_FanOutFanIn(t *testing.T) {
 		AgentRole: "scout",
 		DependsOn: []string{"root"},
 		CustomRunner: func(ctx context.Context, node *TaskNode, mergedInput string) (string, error) {
-			curr := atomic.AddInt64(&activeBranch, 1)
+			curr := activeBranch.Add(1)
 			for {
-				max := atomic.LoadInt64(&maxActiveBranch)
+				max := maxActiveBranch.Load()
 				if curr > max {
-					if atomic.CompareAndSwapInt64(&maxActiveBranch, max, curr) {
+					if maxActiveBranch.CompareAndSwap(max, curr) {
 						break
 					}
 				} else {
@@ -71,7 +71,7 @@ func TestDAGScheduler_TC_DAG_02_FanOutFanIn(t *testing.T) {
 				}
 			}
 			time.Sleep(30 * time.Millisecond)
-			atomic.AddInt64(&activeBranch, -1)
+			activeBranch.Add(-1)
 			return "data_from_branch_a", nil
 		},
 	}
@@ -81,11 +81,11 @@ func TestDAGScheduler_TC_DAG_02_FanOutFanIn(t *testing.T) {
 		AgentRole: "scout",
 		DependsOn: []string{"root"},
 		CustomRunner: func(ctx context.Context, node *TaskNode, mergedInput string) (string, error) {
-			curr := atomic.AddInt64(&activeBranch, 1)
+			curr := activeBranch.Add(1)
 			for {
-				max := atomic.LoadInt64(&maxActiveBranch)
+				max := maxActiveBranch.Load()
 				if curr > max {
-					if atomic.CompareAndSwapInt64(&maxActiveBranch, max, curr) {
+					if maxActiveBranch.CompareAndSwap(max, curr) {
 						break
 					}
 				} else {
@@ -93,7 +93,7 @@ func TestDAGScheduler_TC_DAG_02_FanOutFanIn(t *testing.T) {
 				}
 			}
 			time.Sleep(30 * time.Millisecond)
-			atomic.AddInt64(&activeBranch, -1)
+			activeBranch.Add(-1)
 			return "data_from_branch_b", nil
 		},
 	}
@@ -195,13 +195,13 @@ func TestDAGScheduler_TC_DAG_04_RepairLoopSuccess(t *testing.T) {
 	bb := NewBlackboard()
 	sched := NewDAGScheduler(gov, bb)
 
-	var implementerCalls int32
+	var implementerCalls atomic.Int32
 	implementer := &TaskNode{
 		ID:         "impl",
 		AgentRole:  "implementer",
 		TaskPrompt: "write math function",
 		CustomRunner: func(ctx context.Context, node *TaskNode, in string) (string, error) {
-			call := atomic.AddInt32(&implementerCalls, 1)
+			call := implementerCalls.Add(1)
 			if call == 1 {
 				return "def add(a, b): return a - b", nil // buggy
 			}
@@ -209,14 +209,14 @@ func TestDAGScheduler_TC_DAG_04_RepairLoopSuccess(t *testing.T) {
 		},
 	}
 
-	var verifierRuns int32
+	var verifierRuns atomic.Int32
 	verifier := &TaskNode{
 		ID:         "verif",
 		AgentRole:  "verifier",
 		DependsOn:  []string{"impl"},
 		TaskPrompt: "test math function",
 		CustomRunner: func(ctx context.Context, node *TaskNode, in string) (string, error) {
-			run := atomic.AddInt32(&verifierRuns, 1)
+			run := verifierRuns.Add(1)
 			if run == 1 {
 				return "", errors.New("assertion failed: add(2, 2) == 0, expected 4")
 			}
@@ -233,10 +233,10 @@ func TestDAGScheduler_TC_DAG_04_RepairLoopSuccess(t *testing.T) {
 		t.Fatalf("%s(inputs=%s): got unexpected run error %v, want nil", fn, inputs, err)
 	}
 
-	if got, want := atomic.LoadInt32(&implementerCalls), int32(2); got != want {
+	if got, want := implementerCalls.Load(), int32(2); got != want {
 		t.Errorf("%s(implementerCalls): got %d, want %d", fn, got, want)
 	}
-	if got, want := atomic.LoadInt32(&verifierRuns), int32(2); got != want {
+	if got, want := verifierRuns.Load(), int32(2); got != want {
 		t.Errorf("%s(verifierRuns): got %d, want %d", fn, got, want)
 	}
 	if got, want := verifier.Attempt, 1; got != want {
@@ -267,14 +267,14 @@ func TestDAGScheduler_TC_DAG_05_CircuitBreakerTrip(t *testing.T) {
 		},
 	}
 
-	var verifierRuns int32
+	var verifierRuns atomic.Int32
 	verifier := &TaskNode{
 		ID:         "verif",
 		AgentRole:  "verifier",
 		DependsOn:  []string{"impl"},
 		TaskPrompt: "test math function",
 		CustomRunner: func(ctx context.Context, node *TaskNode, in string) (string, error) {
-			atomic.AddInt32(&verifierRuns, 1)
+			verifierRuns.Add(1)
 			return "", errors.New("persistent test failure: syntax error")
 		},
 	}

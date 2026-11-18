@@ -97,13 +97,7 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 	if o == nil || o.Kind == OverlayNone {
 		return ""
 	}
-	boxW := width - 4
-	if boxW > 76 {
-		boxW = 76
-	}
-	if boxW < 36 {
-		boxW = 36
-	}
+	boxW := max(min(width-4, 76), 36)
 	innerW := boxW - 4
 
 	var title string
@@ -125,10 +119,7 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 			if o.Cursor >= maxShow {
 				start = o.Cursor - maxShow + 1
 			}
-			end := start + maxShow
-			if end > len(filtered) {
-				end = len(filtered)
-			}
+			end := min(start+maxShow, len(filtered))
 			for i := start; i < end; i++ {
 				m := filtered[i]
 				sel := "  "
@@ -235,10 +226,7 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 			if o.Cursor >= maxShow {
 				start = o.Cursor - maxShow + 1
 			}
-			end := start + maxShow
-			if end > len(filtered) {
-				end = len(filtered)
-			}
+			end := min(start+maxShow, len(filtered))
 			for i := start; i < end; i++ {
 				s := filtered[i]
 				sel := "  "

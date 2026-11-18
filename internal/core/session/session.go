@@ -12,7 +12,7 @@ import (
 	"gp/internal/core/storage"
 )
 
-var entrySeq uint64
+var entrySeq atomic.Uint64
 
 // EntryType 会话记录条目类型
 type EntryType string
@@ -159,7 +159,7 @@ func (s *SessionTree) AppendMessage(msg ai.Message) *SessionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entryID := fmt.Sprintf("entry_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&entrySeq, 1))
+	entryID := fmt.Sprintf("entry_%d_%d", time.Now().UnixNano(), entrySeq.Add(1))
 	now := time.Now()
 	entry := &SessionEntry{
 		ID:        entryID,

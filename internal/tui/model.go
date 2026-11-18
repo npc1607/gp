@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -34,28 +35,33 @@ type HeaderInfo struct {
 
 // MainUIModel 全局终端界面状态模型（融合 pi-tidy + pi-zentui 视觉与交互）
 type MainUIModel struct {
-	header        HeaderInfo
-	config        UIConfig
-	theme         Theme
-	activeTabID   string
-	tabIDs        []string
-	agentBuffers  map[string]*AgentViewBuffer
-	workflowTree  *WorkflowTreeModel
-	tray          *ActiveTrayModel
-	working       *WorkingLineState
-	footer        *FooterState
-	authStore     *auth.Store
-	overlay       *OverlayState
-	askUser       *AskUserDialogState
-	inputArea     textinput.Model
-	width         int
-	height        int
-	ready         bool
-	showDAG       bool
-	tickCount     int
-	compCursor    int
-	onUserSubmit    func(prompt string)
-	onModelChange   func(entry auth.ModelEntry, persist bool) error
+	header          HeaderInfo
+	config          UIConfig
+	theme           Theme
+	activeTabID     string
+	tabIDs          []string
+	agentBuffers    map[string]*AgentViewBuffer
+	workflowTree    *WorkflowTreeModel
+	tray            *ActiveTrayModel
+	working         *WorkingLineState
+	footer          *FooterState
+	authStore       *auth.Store
+	overlay         *OverlayState
+	askUser             *AskUserDialogState
+	inputArea           textinput.Model
+	inputBus            *InputBus
+	keymap              *KeymapRegistry
+	primaryBusy         bool
+	interruptedThisTurn bool
+	width               int
+	height              int
+	ready               bool
+	showDAG             bool
+	tickCount           int
+	compCursor          int
+	onUserSubmit        func(prompt string)
+	onCancel            func()
+	onModelChange       func(entry auth.ModelEntry, persist bool) error
 	onAuthChange    func(providerID string)
 	onListSessions  func() ([]storage.SessionSummary, error)
 	onResumeSession func(sessionID string) ([]ai.Message, error)
@@ -89,6 +95,8 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 		authStore:    auth.NewStore(""),
 		overlay:      &OverlayState{},
 		inputArea:    ti,
+		inputBus:     NewInputBus(),
+		keymap:       NewDefaultKeymap(),
 		width:        defaultWidth,
 		height:       defaultHeight,
 		onUserSubmit: onSubmit,
@@ -120,6 +128,9 @@ func (m *MainUIModel) computeBodySize(totalW, totalH int) (int, int) {
 	if compRows := m.completionMenuHeight(); compRows > 0 {
 		deductH += compRows
 	}
+	if m.inputBus != nil && m.inputBus.Len() > 0 {
+		deductH++
+	}
 	if m.askUser != nil && m.askUser.Active {
 		if m.askUser.Collapsed {
 			deductH += 1
@@ -127,20 +138,11 @@ func (m *MainUIModel) computeBodySize(totalW, totalH int) (int, int) {
 			deductH += 14
 		}
 	}
-	bodyH := totalH - deductH
-	if bodyH < 5 {
-		bodyH = 5
-	}
+	bodyH := max(totalH-deductH, 5)
 	bodyW := totalW
 	if m.showDAG && len(m.workflowTree.nodes) > 0 {
-		leftW := totalW * 32 / 100
-		if leftW < 20 {
-			leftW = 20
-		}
-		bodyW = totalW - leftW - 1
-		if bodyW < 20 {
-			bodyW = 20
-		}
+		leftW := max(totalW*32/100, 20)
+		bodyW = max(totalW-leftW-1, 20)
 	}
 	return bodyW, bodyH
 }
@@ -204,6 +206,21 @@ func (m *MainUIModel) TabIDs() []string {
 // AgentBuffer 获取指定 Agent 的缓冲区
 func (m *MainUIModel) AgentBuffer(id string) *AgentViewBuffer {
 	return m.agentBuffers[id]
+}
+
+// SetCancelHandler 注册按下 Esc 中断当前主 Agent 推理的回调
+func (m *MainUIModel) SetCancelHandler(fn func()) {
+	m.onCancel = fn
+}
+
+// InputBus 返回输入指令总线队列实例
+func (m *MainUIModel) InputBus() *InputBus {
+	return m.inputBus
+}
+
+// Keymap 返回快捷键注册中心，支持外部查询、绑定或重绑定快捷键
+func (m *MainUIModel) Keymap() *KeymapRegistry {
+	return m.keymap
 }
 
 // WorkflowTree 获取 DAG 拓扑树组件引用
@@ -391,80 +408,9 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-		case "ctrl+s":
-			if m.header.ModelName != "" {
-				prov := m.header.ProviderName
-				if prov == "" {
-					prov = auth.InferProviderFromModel(m.header.ModelName)
-				}
-				full := m.header.ModelName
-				if prov != "" && !strings.Contains(full, "/") {
-					full = prov + "/" + full
-				}
-				m.applyModelSelection(auth.ModelEntry{
-					Provider: prov,
-					ID:       m.header.ModelName,
-					FullName: full,
-					BaseURL:  m.header.BaseURL,
-				}, true)
-			}
-			return m, nil
-		case "ctrl+o":
-			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-				activeBuf.Transcript.ToggleAllExpanded()
-				activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
-			}
-			return m, nil
-		case "ctrl+t":
-			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-				activeBuf.Transcript.ToggleLatestThinking()
-				activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
-			}
-			return m, nil
-		case "ctrl+g":
-			if len(m.workflowTree.nodes) > 0 {
-				m.showDAG = !m.showDAG
-				m.resizeAllBuffers()
-			}
-			return m, nil
-		case "tab":
-			m.cycleNextTab()
-			return m, nil
-		case "shift+tab":
-			m.cyclePrevTab()
-			return m, nil
-		case "enter":
-			val := strings.TrimSpace(m.inputArea.Value())
-			if val != "" {
-				m.inputArea.Reset()
-				if m.handleLocalCommand(val) {
-					return m, nil
-				}
-				m.submitUserPrompt(val)
-			}
-			return m, nil
-		case "up":
-			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-				activeBuf.Scroll(-1)
-				return m, nil
-			}
-		case "down":
-			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-				activeBuf.Scroll(1)
-				return m, nil
-			}
-		case "pgup":
-			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-				activeBuf.Scroll(-5)
-				return m, nil
-			}
-		case "pgdown":
-			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
-				activeBuf.Scroll(5)
-				return m, nil
+		if m.keymap != nil {
+			if cmd, handled := m.keymap.Dispatch(msg.String(), m); handled {
+				return m, cmd
 			}
 		}
 
@@ -653,14 +599,33 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tray.UpdateCoroutine(specMsg)
 			if specMsg.Active {
 				m.working.Active = true
+				if specMsg.AgentID == "" || specMsg.AgentID == PrimaryAgentID {
+					m.primaryBusy = true
+				}
 				if specMsg.TaskDesc != "" {
 					m.working.TaskDesc = specMsg.TaskDesc
 				}
 				if m.working.StartedAt.IsZero() {
 					m.working.StartedAt = time.Now()
 				}
-			} else if len(m.tray.order) == 0 {
-				m.working.Active = false
+			} else {
+				if len(m.tray.order) == 0 {
+					m.working.Active = false
+				}
+				if specMsg.AgentID == "" || specMsg.AgentID == PrimaryAgentID {
+					m.primaryBusy = false
+					wasInterrupted := m.interruptedThisTurn
+					m.interruptedThisTurn = false
+					if !wasInterrupted && m.inputBus != nil && m.inputBus.Len() > 0 {
+						if squeezed, count, ok := m.inputBus.DequeueSqueezed(); ok {
+							if count > 1 {
+								m.addSystemNotice(fmt.Sprintf("⚡ Coalesced %d queued commands", count), false)
+							}
+							m.dispatchPrompt(squeezed.Text)
+						}
+					}
+					m.resizeAllBuffers()
+				}
 			}
 			return m, tea.Batch(cmds...)
 
@@ -815,10 +780,10 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 	case "/tidy":
 		if len(fields) >= 2 && fields[1] == "turn" {
 			if buf, ok := m.agentBuffers[m.activeTabID]; ok {
-				for i := len(buf.Transcript.Items) - 1; i >= 0; i-- {
-					if buf.Transcript.Items[i].Kind == "turn" {
-						buf.Transcript.Items[i].Turn.Folded = !buf.Transcript.Items[i].Turn.Folded
-						buf.Transcript.Items[i].Turn.FoldManual = true
+				for _, v := range slices.Backward(buf.Transcript.Items) {
+					if v.Kind == "turn" {
+						v.Turn.Folded = !v.Turn.Folded
+						v.Turn.FoldManual = true
 						buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
 						break
 					}
@@ -964,9 +929,22 @@ func (m *MainUIModel) resetSubagentViews() {
 	}
 }
 
-// submitUserPrompt 重置上一轮子 Agent 视图状态并向主 Agent 提交新一轮用户输入
+// submitUserPrompt 向输入总线提交用户输入：空闲时立即派发，忙碌时进入待处理队列
 func (m *MainUIModel) submitUserPrompt(prompt string) {
+	if m.primaryBusy && m.inputBus != nil {
+		_, qLen := m.inputBus.Enqueue(prompt)
+		m.resizeAllBuffers()
+		preview := ClipToWidth(strings.ReplaceAll(strings.TrimSpace(prompt), "\n", " "), 48, "…")
+		m.addSystemNotice(fmt.Sprintf("⏳ Queued (#%d): %s", qLen, preview), false)
+		return
+	}
+	m.dispatchPrompt(prompt)
+}
+
+func (m *MainUIModel) dispatchPrompt(prompt string) {
 	m.resetSubagentViews()
+	m.primaryBusy = true
+	m.interruptedThisTurn = false
 	if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 		activeBuf.RawTextBuffer += "\n[User]: " + prompt + "\n\n"
 		activeBuf.Transcript.AddUserMessage(prompt, time.Now())
@@ -974,7 +952,27 @@ func (m *MainUIModel) submitUserPrompt(prompt string) {
 	}
 	if m.onUserSubmit != nil {
 		m.onUserSubmit(prompt)
+	} else {
+		m.primaryBusy = false
 	}
+}
+
+func (m *MainUIModel) rollbackQueuedPrompt() {
+	if m.inputBus == nil {
+		return
+	}
+	item, ok := m.inputBus.RollbackLast()
+	if !ok {
+		return
+	}
+	cur := strings.TrimSpace(m.inputArea.Value())
+	if cur == "" {
+		m.inputArea.SetValue(item.Text)
+	} else {
+		m.inputArea.SetValue(item.Text + " " + cur)
+	}
+	m.inputArea.CursorEnd()
+	m.resizeAllBuffers()
 }
 
 func (m *MainUIModel) applyResumeSession(sessionID string) {
@@ -1071,14 +1069,8 @@ func (m *MainUIModel) renderTabBar() string {
 
 // View 渲染完整 pi-tidy + pi-zentui 界面
 func (m *MainUIModel) View() string {
-	width := m.width
-	if width < 20 {
-		width = 20
-	}
-	height := m.height
-	if height < 12 {
-		height = 12
-	}
+	width := max(m.width, 20)
+	height := max(m.height, 12)
 
 	var elements []string
 
@@ -1131,10 +1123,30 @@ func (m *MainUIModel) View() string {
 		}
 	}
 
+	// 输入指令总线待处理队列提示条
+	if m.inputBus != nil {
+		if snap := m.inputBus.Snapshot(); len(snap) > 0 {
+			elements = append(elements, m.renderQueueBar(snap, width))
+		}
+	}
+
 	// pi-zentui Opencode Editor (内嵌 Working Line)
-	rightHint := "ctrl+o fold · ctrl+t think"
+	foldKey := "ctrl+o"
+	thinkKey := "ctrl+t"
+	dagKey := "ctrl+g"
+	stopKey := "esc"
+	if m.keymap != nil {
+		foldKey = m.keymap.HintLabel("toggle_folds", foldKey)
+		thinkKey = m.keymap.HintLabel("toggle_thinking", thinkKey)
+		dagKey = m.keymap.HintLabel("toggle_dag", dagKey)
+		stopKey = strings.ToLower(m.keymap.HintLabel("interrupt_or_rollback", stopKey))
+	}
+	rightHint := foldKey + " fold · " + thinkKey + " think"
+	if m.primaryBusy {
+		rightHint = stopKey + " stop · " + rightHint
+	}
 	if len(m.workflowTree.nodes) > 0 {
-		rightHint = "ctrl+g dag · " + rightHint
+		rightHint = dagKey + " dag · " + rightHint
 	}
 	editorStr := RenderEditor(m.inputArea, width, m.theme, m.config, EditorMeta{
 		ModelName:     m.header.ModelName,
@@ -1160,4 +1172,23 @@ func (m *MainUIModel) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, elements...)
+}
+
+func (m *MainUIModel) renderQueueBar(snap []QueuedPrompt, width int) string {
+	latest := strings.ReplaceAll(strings.TrimSpace(snap[len(snap)-1].Text), "\n", " ")
+	rollbackLabel := "Alt/Cmd+↑"
+	squeezeLabel := "Ctrl+E"
+	if m.keymap != nil {
+		rollbackLabel = m.keymap.HintLabel("rollback_queue", rollbackLabel)
+		squeezeLabel = m.keymap.HintLabel("squeeze_queue", squeezeLabel)
+	}
+	hints := rollbackLabel + " rollback"
+	if len(snap) > 1 {
+		hints += " · " + squeezeLabel + " squeeze"
+	}
+	prefix := m.theme.BoldFg(m.theme.Warning, fmt.Sprintf("⏳ Queued (%d):", len(snap)))
+	suffix := m.theme.Fg(m.theme.Dim, " ["+hints+"]")
+	avail := max(width-VisibleWidth(prefix)-VisibleWidth(suffix)-2, 12)
+	preview := ClipToWidth(latest, avail, "…")
+	return ClipToWidth(prefix+" "+m.theme.Fg(m.theme.Muted, preview)+suffix, width, "…")
 }

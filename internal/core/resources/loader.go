@@ -42,10 +42,10 @@ func ParseSkillFile(filePath string) (*Skill, error) {
 	if strings.HasPrefix(trimmed, "---") {
 		// 寻找第二个 ---
 		rest := trimmed[3:]
-		idx := strings.Index(rest, "\n---")
-		if idx != -1 {
-			frontmatter := rest[:idx] + "\n"
-			body := rest[idx+4:]
+		before, after, ok := strings.Cut(rest, "\n---")
+		if ok {
+			frontmatter := before + "\n"
+			body := after
 
 			if yamlErr := yaml.Unmarshal([]byte(frontmatter), skill); yamlErr != nil {
 				return nil, fmt.Errorf("parse yaml frontmatter (%s): %w", filePath, yamlErr)
@@ -178,9 +178,9 @@ func (r *ResourceLoader) BuildSystemPrompt(basePrompt string) string {
 		if len(ctx.Skills) > 0 {
 			sb.WriteString("# Available Domain Skills\n\n")
 			for _, s := range ctx.Skills {
-				sb.WriteString(fmt.Sprintf("## Skill: %s\n", s.Name))
+				fmt.Fprintf(&sb, "## Skill: %s\n", s.Name)
 				if s.Description != "" {
-					sb.WriteString(fmt.Sprintf("**Description**: %s\n\n", s.Description))
+					fmt.Fprintf(&sb, "**Description**: %s\n\n", s.Description)
 				}
 				if s.Instructions != "" {
 					sb.WriteString(s.Instructions)

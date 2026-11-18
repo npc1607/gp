@@ -3,9 +3,9 @@ VERSION := v0.1.0-alpha
 BUILD_DIR := bin
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
-.PHONY: all build test cross-compile clean
+.PHONY: all build test lint cross-compile clean
 
-all: test build
+all: lint test build
 
 build:
 	@mkdir -p $(BUILD_DIR)
@@ -13,6 +13,14 @@ build:
 
 test:
 	go test -v -race -count=1 ./...
+
+lint:
+	go vet ./...
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run ./...; \
+	else \
+		echo "golangci-lint not found, skipping"; \
+	fi
 
 cross-compile:
 	@mkdir -p $(BUILD_DIR)

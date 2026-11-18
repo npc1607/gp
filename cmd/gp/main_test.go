@@ -62,7 +62,6 @@ func TestCLI_TC_CLI_01_ResumeCommandAndFlags(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			resumeCmd := flag.NewFlagSet("resume", flag.ContinueOnError)
 			resumeDB := resumeCmd.String("db", ".gp/gp.db", "SQLite 数据库路径")
@@ -156,7 +155,7 @@ func TestCLI_TC_CLI_001_DefaultFlagFallback(t *testing.T) {
 		t.Fatalf("%s: write project settings failed: %v", fn, err)
 	}
 
-	inputs := map[string]interface{}{
+	inputs := map[string]any{
 		"cwd":           tmpDir,
 		"settingsModel": "project-configured-model",
 		"args":          []string{},
@@ -222,7 +221,6 @@ func TestCLI_TC_TUI_012_NonTTYFallback(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Helper()
 			cmd := exec.Command(binPath, tc.args...)

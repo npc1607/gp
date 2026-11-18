@@ -261,7 +261,7 @@ func TestPrintRunner_TC_MOD_001_DefaultParamsResolution(t *testing.T) {
 		SettingsMgr: mgr,
 	})
 
-	inputs := map[string]interface{}{
+	inputs := map[string]any{
 		"opts.ModelName": "",
 		"settings.Model": "m-custom",
 	}
@@ -287,7 +287,7 @@ func TestPrintRunner_TC_MOD_002_ToolAllowlistFallback(t *testing.T) {
 		Cwd:           tmpDir,
 	})
 
-	inputs := map[string]interface{}{
+	inputs := map[string]any{
 		"opts.ToolAllowlist":    nil,
 		"settings.DefaultTools": []string{"read", "bash"},
 	}

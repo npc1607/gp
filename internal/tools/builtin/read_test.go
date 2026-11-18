@@ -228,7 +228,7 @@ func TestReadTool_TC_RD_001_PaginationAndFormatting(t *testing.T) {
 
 	var sb strings.Builder
 	for i := 1; i <= 10; i++ {
-		sb.WriteString(fmt.Sprintf("content line %d\n", i))
+		fmt.Fprintf(&sb, "content line %d\n", i)
 	}
 	filePath := setupReadTestFile(t, tmpDir, "test.txt", sb.String())
 
@@ -270,7 +270,7 @@ func TestReadTool_TC_RD_002_TruncationAndContinueNotice(t *testing.T) {
 
 	var sb strings.Builder
 	for i := 1; i <= 3000; i++ {
-		sb.WriteString(fmt.Sprintf("Line number %04d: testing overflow truncation\n", i))
+		fmt.Fprintf(&sb, "Line number %04d: testing overflow truncation\n", i)
 	}
 	filePath := setupReadTestFile(t, tmpDir, "large.txt", sb.String())
 

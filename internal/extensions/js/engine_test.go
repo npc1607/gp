@@ -366,7 +366,7 @@ gp.registerTool({
 	errs := make([]error, goroutines)
 	results := make([]string, goroutines)
 
-	for i := 0; i < goroutines; i++ {
+	for i := range goroutines {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -390,7 +390,7 @@ gp.registerTool({
 
 	wg.Wait()
 
-	for idx := 0; idx < goroutines; idx++ {
+	for idx := range goroutines {
 		if errs[idx] != nil {
 			t.Fatalf("%s(goroutine=%d): got error %v, want nil", fn, idx, errs[idx])
 		}

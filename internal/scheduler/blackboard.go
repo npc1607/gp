@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -89,9 +90,7 @@ func (b *Blackboard) Snapshot() map[string]any {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	snap := make(map[string]any, len(b.data))
-	for k, v := range b.data {
-		snap[k] = v
-	}
+	maps.Copy(snap, b.data)
 	return snap
 }
 
@@ -133,7 +132,7 @@ func (b *Blackboard) BuildInputForTask(dependsOn []string) string {
 	var sb strings.Builder
 	for _, dep := range dependsOn {
 		if val, ok := b.data[dep]; ok {
-			sb.WriteString(fmt.Sprintf("\n--- 来自依赖节点 [%s] 的事实数据 ---\n%v\n", dep, val))
+			fmt.Fprintf(&sb, "\n--- 来自依赖节点 [%s] 的事实数据 ---\n%v\n", dep, val)
 		}
 	}
 	return sb.String()

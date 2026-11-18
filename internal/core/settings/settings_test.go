@@ -293,7 +293,7 @@ func TestSettings_TC_SET_007_PersistenceAndDirCreation(t *testing.T) {
 	}
 
 	deepPath := filepath.Join(tmpDir, "level1", "level2", "deep_settings.json")
-	inputs := map[string]interface{}{
+	inputs := map[string]any{
 		"path":     deepPath,
 		"settings": toSave,
 	}
@@ -468,7 +468,6 @@ func TestSettings_EnvVarTableDriven(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			cleanEnv(t)
 			for k, v := range tt.envMap {

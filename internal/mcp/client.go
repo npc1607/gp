@@ -151,7 +151,7 @@ func (c *Client) closeWithError(err error) {
 			}()
 
 			select {
-			case <-doneCh:
+			case <-doneCh: //nolint:errcheck // best-effort drain on shutdown
 			case <-time.After(1 * time.Second):
 				_ = c.cmd.Process.Kill()
 			}

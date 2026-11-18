@@ -99,8 +99,8 @@ func (b *AgentViewBuffer) Resize(width, height int) {
 // Scroll 向上或向下滚动视口（正数为向下，负数为向上）
 func (b *AgentViewBuffer) Scroll(delta int) {
 	if delta > 0 {
-		b.Viewport.LineDown(delta)
+		b.Viewport.ScrollDown(delta)
 	} else if delta < 0 {
-		b.Viewport.LineUp(-delta)
+		b.Viewport.ScrollUp(-delta)
 	}
 }

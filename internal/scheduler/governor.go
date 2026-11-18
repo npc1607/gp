@@ -122,9 +122,9 @@ func NewTokenBucket(capacity int, window time.Duration) *SlidingWindowLimiter {
 type Governor struct {
 	concurrencySem  chan struct{}
 	limiter         *SlidingWindowLimiter
-	activeCount     int64
-	queueDepth      int64
-	totalDispatched int64
+	activeCount     atomic.Int64
+	queueDepth      atomic.Int64
+	totalDispatched atomic.Int64
 	maxConcurrency  int
 	tokensPerMin    int
 }
@@ -158,12 +158,12 @@ func (g *Governor) ExecuteSubagent(ctx context.Context, fn func(ctx context.Cont
 // ExecuteWithTokens 调度执行消耗特定 Token 预算的任务
 func (g *Governor) ExecuteWithTokens(ctx context.Context, tokens int, fn func(ctx context.Context) error) error {
 	// 1. 排队计数增加
-	atomic.AddInt64(&g.queueDepth, 1)
+	g.queueDepth.Add(1)
 
 	// 2. 获取并发槽位 (防止 Goroutine 数量失控)
 	select {
 	case <-ctx.Done():
-		atomic.AddInt64(&g.queueDepth, -1)
+		g.queueDepth.Add(-1)
 		return ctx.Err()
 	case g.concurrencySem <- struct{}{}:
 	}
@@ -171,17 +171,17 @@ func (g *Governor) ExecuteWithTokens(ctx context.Context, tokens int, fn func(ct
 	// 3. 限流排队 (防止 429)
 	if err := g.limiter.Wait(ctx, tokens); err != nil {
 		<-g.concurrencySem
-		atomic.AddInt64(&g.queueDepth, -1)
+		g.queueDepth.Add(-1)
 		return err
 	}
 
 	// 4. 从排队转入活跃执行
-	atomic.AddInt64(&g.queueDepth, -1)
-	atomic.AddInt64(&g.activeCount, 1)
-	atomic.AddInt64(&g.totalDispatched, 1)
+	g.queueDepth.Add(-1)
+	g.activeCount.Add(1)
+	g.totalDispatched.Add(1)
 
 	defer func() {
-		atomic.AddInt64(&g.activeCount, -1)
+		g.activeCount.Add(-1)
 		<-g.concurrencySem
 	}()
 
@@ -191,17 +191,17 @@ func (g *Governor) ExecuteWithTokens(ctx context.Context, tokens int, fn func(ct
 
 // ActiveCount 当前活跃并发执行中的协程数
 func (g *Governor) ActiveCount() int {
-	return int(atomic.LoadInt64(&g.activeCount))
+	return int(g.activeCount.Load())
 }
 
 // QueueDepth 当前正在等待信号量或 Token 的排队协程数
 func (g *Governor) QueueDepth() int {
-	return int(atomic.LoadInt64(&g.queueDepth))
+	return int(g.queueDepth.Load())
 }
 
 // TotalDispatched 历史上成功进入执行的总任务数
 func (g *Governor) TotalDispatched() int64 {
-	return atomic.LoadInt64(&g.totalDispatched)
+	return g.totalDispatched.Load()
 }
 
 // Stats 返回当前调度器的统计观测快照

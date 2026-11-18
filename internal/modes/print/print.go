@@ -116,7 +116,7 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 		ag.SetSystemPrompt(sysPrompt)
 	}
 
-	var store storage.Storage = r.opts.Storage
+	store := r.opts.Storage
 	var shouldCloseStore bool
 	if store == nil && r.opts.DBPath != "" {
 		if s, err := sqlite.Open(r.opts.DBPath); err == nil {

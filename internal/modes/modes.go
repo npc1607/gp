@@ -87,7 +87,7 @@ func (r *ResumeRunner) Run(ctx context.Context, _ string) error {
 
 	if dbPath != ":memory:" && dbPath != "file::memory:?cache=shared" {
 		if _, err := os.Stat(dbPath); err != nil {
-			fmt.Fprintln(outWriter, "No unfinished tasks found to resume.")
+			_, _ = fmt.Fprintln(outWriter, "No unfinished tasks found to resume.")
 			return nil
 		}
 	}
@@ -166,7 +166,7 @@ func (r *ResumeRunner) Run(ctx context.Context, _ string) error {
 	})
 
 	if errors.Is(resumeErr, agent.ErrNoUnfinishedTask) {
-		fmt.Fprintln(outWriter, "No unfinished tasks found to resume.")
+		_, _ = fmt.Fprintln(outWriter, "No unfinished tasks found to resume.")
 		return nil
 	}
 	if resumeErr != nil {

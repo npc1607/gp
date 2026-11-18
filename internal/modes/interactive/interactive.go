@@ -2,9 +2,11 @@ package interactive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -180,7 +182,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		_ = err
 	}
 
-	var store storage.Storage = r.opts.Storage
+	store := r.opts.Storage
 	var shouldCloseStore bool
 	if store == nil && r.opts.DBPath != "" {
 		if s, err := sqlite.Open(r.opts.DBPath); err == nil {
@@ -295,6 +297,8 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 	})
 
 	var isRunning atomic.Bool
+	var cancelMu sync.Mutex
+	var activeCancel context.CancelFunc
 	uiModel := tui.NewMainUIModel(header, func(userPrompt string) {
 		if !isRunning.CompareAndSwap(false, true) {
 			if p != nil {
@@ -302,8 +306,11 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			}
 			return
 		}
+		turnCtx, cancel := context.WithCancel(ctx)
+		cancelMu.Lock()
+		activeCancel = cancel
+		cancelMu.Unlock()
 		go func() {
-			defer isRunning.Store(false)
 			if p != nil {
 				p.Send(tui.ActiveCoroutineMsg{
 					AgentID:  tui.PrimaryAgentID,
@@ -311,18 +318,35 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 					Active:   true,
 				})
 			}
-			_, promptErr := ag.Prompt(ctx, userPrompt)
+			_, promptErr := ag.Prompt(turnCtx, userPrompt)
+			cancel()
+			cancelMu.Lock()
+			activeCancel = nil
+			cancelMu.Unlock()
+			isRunning.Store(false)
 			if p != nil {
 				p.Send(tui.ActiveCoroutineMsg{
 					AgentID: tui.PrimaryAgentID,
 					Active:  false,
 				})
 				if promptErr != nil {
-					p.Send(tui.TurnEndMsg{AgentID: tui.PrimaryAgentID, Outcome: "error"})
-					p.Send(tui.ErrorMsg{Err: promptErr})
+					if errors.Is(promptErr, context.Canceled) {
+						p.Send(tui.TurnEndMsg{AgentID: tui.PrimaryAgentID, Outcome: "interrupted"})
+					} else {
+						p.Send(tui.TurnEndMsg{AgentID: tui.PrimaryAgentID, Outcome: "error"})
+						p.Send(tui.ErrorMsg{Err: promptErr})
+					}
 				}
 			}
 		}()
+	})
+	uiModel.SetCancelHandler(func() {
+		cancelMu.Lock()
+		cancel := activeCancel
+		cancelMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	})
 
 	// Headless 测试模式直接返回，避免在无终端环境阻塞 Program.Run

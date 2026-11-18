@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -130,12 +131,12 @@ func (tr *Transcript) RecordAgentFlow(msg AgentFlowMsg) {
 		})
 		return
 	}
-	for i := len(tr.Flows) - 1; i >= 0; i-- {
-		if tr.Flows[i].ChildID == msg.ChildID {
-			tr.Flows[i].Pending = false
-			tr.Flows[i].ResultOut = msg.Payload
-			tr.Flows[i].IsError = msg.IsError
-			tr.Flows[i].Duration = msg.Duration
+	for _, v := range slices.Backward(tr.Flows) {
+		if v.ChildID == msg.ChildID {
+			v.Pending = false
+			v.ResultOut = msg.Payload
+			v.IsError = msg.IsError
+			v.Duration = msg.Duration
 			return
 		}
 	}
@@ -264,13 +265,13 @@ func (tr *Transcript) StartToolCall(callID, toolName, argsRaw string, cfg UIConf
 }
 
 func (tr *Transcript) FinishToolCall(callID, toolName, argsRaw, result string, isErr bool, dur time.Duration) {
-	for i := len(tr.Items) - 1; i >= 0; i-- {
-		if tr.Items[i].Kind != "turn" {
+	for _, v := range slices.Backward(tr.Items) {
+		if v.Kind != "turn" {
 			continue
 		}
-		turn := tr.Items[i].Turn
-		for j := len(turn.Steps) - 1; j >= 0; j-- {
-			st := turn.Steps[j]
+		turn := v.Turn
+		for _, st := range slices.Backward(turn.Steps) {
+
 			if st.Kind == "tool_box" && st.Tool != nil && (st.Tool.CallID == callID || (callID == "" && st.Tool.ToolName == toolName && st.Tool.Pending)) {
 				st.Tool.Pending = false
 				st.Tool.Result = result
@@ -282,8 +283,8 @@ func (tr *Transcript) FinishToolCall(callID, toolName, argsRaw, result string, i
 				return
 			}
 			if st.Kind == "group" && st.Group != nil {
-				for k := len(st.Group.Tools) - 1; k >= 0; k-- {
-					tc := st.Group.Tools[k]
+				for _, tc := range slices.Backward(st.Group.Tools) {
+
 					if tc.CallID == callID || (callID == "" && tc.ToolName == toolName && tc.Pending) {
 						tc.Pending = false
 						tc.Result = result
@@ -302,20 +303,20 @@ func (tr *Transcript) FinishToolCall(callID, toolName, argsRaw, result string, i
 
 func (tr *Transcript) FinishTurn(outcome string, cfg UIConfig) {
 	now := time.Now()
-	for i := len(tr.Items) - 1; i >= 0; i-- {
-		if tr.Items[i].Kind != "turn" || tr.Items[i].Turn == nil {
+	for _, v := range slices.Backward(tr.Items) {
+		if v.Kind != "turn" || v.Turn == nil {
 			continue
 		}
-		turn := tr.Items[i].Turn
+		turn := v.Turn
 		if turn.Outcome != "running" {
 			continue
 		}
 		turn.Outcome = outcome
 		turn.EndedAt = now
 		// 提取最后一个非空 text step 作为 FinalText（仅当已结束且存在回复时）
-		for j := len(turn.Steps) - 1; j >= 0; j-- {
-			if turn.Steps[j].Kind == "text" && strings.TrimSpace(turn.Steps[j].Text) != "" {
-				turn.FinalText = turn.Steps[j].Text
+		for _, v := range slices.Backward(turn.Steps) {
+			if v.Kind == "text" && strings.TrimSpace(v.Text) != "" {
+				turn.FinalText = v.Text
 				break
 			}
 		}
@@ -382,15 +383,15 @@ func (tr *Transcript) ToggleAllExpanded() {
 
 // ToggleLatestThinking 对应 Ctrl+T：切换最近一条思考块的展开状态
 func (tr *Transcript) ToggleLatestThinking() {
-	for i := len(tr.Items) - 1; i >= 0; i-- {
-		if tr.Items[i].Kind != "turn" {
+	for _, v := range slices.Backward(tr.Items) {
+		if v.Kind != "turn" {
 			continue
 		}
-		turn := tr.Items[i].Turn
-		for j := len(turn.Steps) - 1; j >= 0; j-- {
-			if turn.Steps[j].Kind == "thinking" {
-				turn.Steps[j].ThinkOpen = !turn.Steps[j].ThinkOpen
-				if turn.Folded && turn.Steps[j].ThinkOpen {
+		turn := v.Turn
+		for _, v := range slices.Backward(turn.Steps) {
+			if v.Kind == "thinking" {
+				v.ThinkOpen = !v.ThinkOpen
+				if turn.Folded && v.ThinkOpen {
 					turn.Folded = false
 					turn.FoldManual = true
 				}
@@ -403,8 +404,8 @@ func (tr *Transcript) ToggleLatestThinking() {
 // HandleClick 根据点击行号命中折叠/展开目标
 func (tr *Transcript) HandleClick(lineIdx int) bool {
 	// 从内层往外层匹配（Tool -> Group -> Thinking -> Turn）
-	for i := len(tr.HitRegions) - 1; i >= 0; i-- {
-		hr := tr.HitRegions[i]
+	for _, hr := range slices.Backward(tr.HitRegions) {
+
 		if lineIdx < hr.StartLine || lineIdx > hr.EndLine {
 			continue
 		}
@@ -563,8 +564,8 @@ func (tr *Transcript) renderTurnItem(turnIdx int, turn *TurnItem, baseLine int, 
 	// 找到最后一个非空文本步骤作为 final reply 候选
 	finalStepIdx := -1
 	if turn.Outcome != "running" {
-		for j := len(turn.Steps) - 1; j >= 0; j-- {
-			if turn.Steps[j].Kind == "text" && strings.TrimSpace(turn.Steps[j].Text) != "" {
+		for j, v := range slices.Backward(turn.Steps) {
+			if v.Kind == "text" && strings.TrimSpace(v.Text) != "" {
 				finalStepIdx = j
 				break
 			}
@@ -645,7 +646,7 @@ func (tr *Transcript) renderTurnItem(turnIdx int, turn *TurnItem, baseLine int, 
 			gLines := tr.renderToolGroup(turnIdx, stepIdx, st.Group, baseLine+len(out), innerW, t, cfg, spinnerGlyph, railPrefix)
 			out = append(out, gLines...)
 
-			case "tool_box":
+		case "tool_box":
 			startL := baseLine + len(out)
 			boxW := innerW
 			if railActive {
@@ -789,10 +790,7 @@ func (tr *Transcript) formatTurnSummary(turn *TurnItem, width int, t Theme, cfg 
 	if failedCount > 0 {
 		parts = append(parts, t.Fg(t.Error, fmt.Sprintf("%d failed", failedCount)))
 	}
-	llmDur := total - totalToolDur
-	if llmDur < 0 {
-		llmDur = 0
-	}
+	llmDur := max(total-totalToolDur, 0)
 	pIcon := ProviderIcon(turn.Provider, turn.Model, cfg.Icons)
 	if pIcon != "" {
 		parts = append(parts, t.Fg(t.Muted, fmt.Sprintf("%s LLM %s", pIcon, formatShortDuration(llmDur))))
@@ -858,10 +856,7 @@ func renderThinkingStep(st *TurnStep, width int, t Theme, cfg UIConfig, running 
 	if glyph != "" {
 		head = t.Fg(t.Thinking, glyph) + " " + head
 	}
-	budget := width - VisibleWidth(head) - 4
-	if budget < 8 {
-		budget = 8
-	}
+	budget := max(width-VisibleWidth(head)-4, 8)
 	preview := ClipToWidth(flat, budget, "…")
 	return []string{" " + head + "  " + t.ItalicFg(t.Muted, preview)}
 }
@@ -1019,10 +1014,7 @@ func formatToolRow(tc *ToolCallItem, width int, t Theme, cfg UIConfig, spinnerGl
 		return ClipToWidth(left+"  "+tail, width, "…")
 	}
 	clippedLeft := ClipToWidth(left, availLeft, "…")
-	gap := width - VisibleWidth(clippedLeft) - tailW
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(width-VisibleWidth(clippedLeft)-tailW, 1)
 	return clippedLeft + strings.Repeat(" ", gap) + tail
 }
 
@@ -1335,7 +1327,7 @@ func summarizeToolResult(res string, isErr bool) string {
 		return ""
 	}
 	if isErr {
-		firstLine := strings.SplitN(trimmed, "\n", 2)[0]
+		firstLine, _, _ := strings.Cut(trimmed, "\n")
 		return ClipToWidth(firstLine, 24, "…")
 	}
 	lines := strings.Count(trimmed, "\n") + 1

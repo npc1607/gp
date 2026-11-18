@@ -218,7 +218,7 @@ func (m *Manager) applyEnvOverrides(target *Settings) {
 
 	if val := os.Getenv("GP_TOOLS"); val != "" {
 		var tools []string
-		for _, t := range strings.Split(val, ",") {
+		for t := range strings.SplitSeq(val, ",") {
 			if trimmed := strings.TrimSpace(t); trimmed != "" {
 				tools = append(tools, trimmed)
 			}

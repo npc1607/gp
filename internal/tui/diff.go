@@ -9,13 +9,13 @@ import (
 )
 
 type diffRow struct {
-	kind     string // "ctx" | "change" | "skip"
-	oldNum   int
-	oldText  string
-	oldChg   bool
-	newNum   int
-	newText  string
-	newChg   bool
+	kind    string // "ctx" | "change" | "skip"
+	oldNum  int
+	oldText string
+	oldChg  bool
+	newNum  int
+	newText string
+	newChg  bool
 }
 
 // ComputeLineDiff 计算 oldText 与 newText 的行级 LCS diff 并对齐为并排视图行
@@ -27,11 +27,8 @@ func ComputeLineDiff(oldText, newText string) []diffRow {
 	// 对于超大文本做简单保护，避免 O(N^2) 内存爆炸
 	if m*n > 250000 {
 		var rows []diffRow
-		maxLen := m
-		if n > maxLen {
-			maxLen = n
-		}
-		for i := 0; i < maxLen; i++ {
+		maxLen := max(n, m)
+		for i := range maxLen {
 			var o, nw string
 			var oNum, nNum int
 			if i < m {
@@ -125,11 +122,8 @@ func ComputeLineDiff(oldText, newText string) []diffRow {
 			added = append(added, ops[k])
 			k++
 		}
-		pairs := len(removed)
-		if len(added) > pairs {
-			pairs = len(added)
-		}
-		for p := 0; p < pairs; p++ {
+		pairs := max(len(added), len(removed))
+		for p := range pairs {
 			var r diffRow
 			r.kind = "change"
 			if p < len(removed) {
@@ -170,10 +164,7 @@ func RenderSplitDiff(oldText, newText string, width, maxLines int, split bool, s
 	if maxLines > 0 && len(rows) > maxLines {
 		start := 0
 		if firstChange >= 0 {
-			start = firstChange - maxLines/3
-			if start < 0 {
-				start = 0
-			}
+			start = max(firstChange-maxLines/3, 0)
 			if start+maxLines > len(rows) {
 				start = len(rows) - maxLines
 			}
@@ -204,10 +195,7 @@ func RenderSplitDiff(oldText, newText string, width, maxLines int, split bool, s
 			maxNum = r.newNum
 		}
 	}
-	numW := len(fmt.Sprintf("%d", maxNum))
-	if numW < 2 {
-		numW = 2
-	}
+	numW := max(len(fmt.Sprintf("%d", maxNum)), 2)
 
 	out := make([]string, 0, len(rows)+1)
 	for _, r := range rows {
@@ -247,15 +235,9 @@ func renderDiffPaneCell(num int, text string, changed, isNew bool, paneW, numW i
 	}
 
 	prefixW := 2 + numW + 1 // bar + space + num + space
-	codeW := paneW - prefixW
-	if codeW < 1 {
-		codeW = 1
-	}
+	codeW := max(paneW-prefixW, 1)
 	clipped := ClipToWidth(text, codeW, "…")
-	padLen := codeW - VisibleWidth(clipped)
-	if padLen < 0 {
-		padLen = 0
-	}
+	padLen := max(codeW-VisibleWidth(clipped), 0)
 	body := fmt.Sprintf(" %s %s%s", numStr, clipped, strings.Repeat(" ", padLen))
 	if changed {
 		return bar + lipgloss.NewStyle().Foreground(fg).Background(bg).Render(body)

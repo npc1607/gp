@@ -1,16 +1,18 @@
 package tui
 
+import "slices"
+
 // UIConfig 统一配置 pi-tidy 与 pi-zentui 风格的视觉与交互参数
 type UIConfig struct {
 	Icons bool
 
 	// pi-tidy: User message & Reply & Turn folding
-	UserMessageStyle   string   // "frame" | "zentui-framed" | "rail" | "rules" | "off"
-	UserMessageAlign   string   // "left" | "right"
+	UserMessageStyle   string // "frame" | "zentui-framed" | "rail" | "rules" | "off"
+	UserMessageAlign   string // "left" | "right"
 	UserMessageTime    bool
-	CollapseTurns      string   // "afterRun" | "live" | "off"
-	FinalReplyStyle    string   // "frame" | "rail" | "rules" | "off"
-	MessageHeaderStyle string   // "inline" | "split"
+	CollapseTurns      string // "afterRun" | "live" | "off"
+	FinalReplyStyle    string // "frame" | "rail" | "rules" | "off"
+	MessageHeaderStyle string // "inline" | "split"
 	GroupTools         bool
 	GroupOpen          bool
 	AlwaysShowTools    []string // default: ["edit", "write"]
@@ -18,7 +20,7 @@ type UIConfig struct {
 	WriteLines         int      // default: 10
 	DiffLines          int      // default: 20
 	SplitDiff          bool
-	SplitDiffMinWidth  int      // default: 72
+	SplitDiffMinWidth  int // default: 72
 	CodeBlocks         bool
 	HexSwatches        bool
 	HighlightBash      bool
@@ -60,10 +62,5 @@ func DefaultUIConfig() UIConfig {
 
 // IsAlwaysShownTool 判断工具是否始终以独立圆角框展示（不折叠进工具组）
 func (c UIConfig) IsAlwaysShownTool(name string) bool {
-	for _, t := range c.AlwaysShowTools {
-		if t == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.AlwaysShowTools, name)
 }

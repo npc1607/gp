@@ -1,0 +1,27 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*gp/internal/core/storage/sqlite.SqliteStorage).Close
+        - (gp/internal/core/storage.Storage).Close
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck

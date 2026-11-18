@@ -86,12 +86,14 @@ func NewAskUserDialogState(msg AskUserQuestionMsg) *AskUserDialogState {
 			MultiChecked: make(map[int]bool),
 		}
 	}
+	editingCustom := len(msg.Questions) > 0 && len(msg.Questions[0].Options) == 0
 	return &AskUserDialogState{
-		Active:     true,
-		Questions:  msg.Questions,
-		ResponseCh: msg.ResponseCh,
-		Drafts:     drafts,
-		Input:      ti,
+		Active:        true,
+		Questions:     msg.Questions,
+		ResponseCh:    msg.ResponseCh,
+		Drafts:        drafts,
+		EditingCustom: editingCustom,
+		Input:         ti,
 	}
 }
 
@@ -230,7 +232,7 @@ func (m *MainUIModel) HandleAskUserKey(msg tea.KeyMsg) bool {
 		return false
 	}
 	if d.Collapsed {
-		return true
+		return false
 	}
 
 	// 处于自定义回答或备注输入态
@@ -296,6 +298,7 @@ func (m *MainUIModel) HandleAskUserKey(msg tea.KeyMsg) bool {
 		return true
 	case "n":
 		d.EditingNote = true
+		d.Input.Focus()
 		if d.isSubmitTab() {
 			d.Input.SetValue(d.GlobalNote)
 		} else {
@@ -353,6 +356,13 @@ func (m *MainUIModel) HandleAskUserKey(msg tea.KeyMsg) bool {
 					return true
 				}
 				d.ActiveTab++
+			} else if idx == typeSomethingIdx {
+				dr.Cursor = typeSomethingIdx
+				d.EditingCustom = true
+				d.Input.Focus()
+				d.Input.SetValue(dr.CustomText)
+				d.Input.CursorEnd()
+				return true
 			}
 		}
 	case " ":
@@ -362,6 +372,7 @@ func (m *MainUIModel) HandleAskUserKey(msg tea.KeyMsg) bool {
 	case "enter":
 		if dr.Cursor == typeSomethingIdx {
 			d.EditingCustom = true
+			d.Input.Focus()
 			d.Input.SetValue(dr.CustomText)
 			d.Input.CursorEnd()
 			return true
@@ -381,6 +392,16 @@ func (m *MainUIModel) HandleAskUserKey(msg tea.KeyMsg) bool {
 			return true
 		}
 		d.ActiveTab++
+	default:
+		// 光标停留在 "Type something." 或纯开放式问题（无预设选项）时，直接键入字符自动进入输入态
+		if dr.Cursor == typeSomethingIdx && (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) {
+			d.EditingCustom = true
+			d.Input.Focus()
+			d.Input.SetValue(dr.CustomText)
+			d.Input.CursorEnd()
+			d.Input, _ = d.Input.Update(msg)
+			return true
+		}
 	}
 	return true
 }

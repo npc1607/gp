@@ -265,7 +265,7 @@ func main() {
 }
 
 func askLLM(ctx context.Context, p ai.Provider, gov *scheduler.Governor, prompt, fallback string) string {
-	var res string
+	var res strings.Builder
 	err := gov.ExecuteSubagent(ctx, func(c context.Context) error {
 		req := &ai.ChatRequest{
 			Model: modelName,
@@ -278,15 +278,15 @@ func askLLM(ctx context.Context, p ai.Provider, gov *scheduler.Governor, prompt,
 			return e
 		}
 		for chunk := range ch {
-			res += chunk.DeltaText
+			res.WriteString(chunk.DeltaText)
 		}
 		return nil
 	})
 
-	if err != nil || strings.TrimSpace(res) == "" {
+	if err != nil || strings.TrimSpace(res.String()) == "" {
 		return fallback
 	}
-	return strings.TrimSpace(res)
+	return strings.TrimSpace(res.String())
 }
 
 func drawCards(s *SanguoshaState, target string, count int) {
@@ -295,7 +295,7 @@ func drawCards(s *SanguoshaState, target string, count int) {
 
 	pool := []string{"杀", "闪", "桃", "酒", "决斗"}
 	var drawn []string
-	for i := 0; i < count; i++ {
+	for range count {
 		c := pool[rand.Intn(len(pool))]
 		drawn = append(drawn, c)
 	}
@@ -338,11 +338,4 @@ func renderHP(hp int) string {
 
 func sleep(sec int) {
 	time.Sleep(time.Duration(sec) * time.Second)
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

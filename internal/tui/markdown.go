@@ -9,7 +9,6 @@ import (
 
 var (
 	mdBoldRe       = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	mdItalicRe     = regexp.MustCompile(`(?:^|[^*])\*([^*]+)\*(?:[^*]|$)`)
 	mdInlineCodeRe = regexp.MustCompile("`([^`]+)`")
 )
 
@@ -81,10 +80,10 @@ func RenderMarkdownWithCodeBlocks(text string, width int, t Theme, cfg UIConfig,
 
 	for _, raw := range rawLines {
 		trimmed := strings.TrimSpace(raw)
-		if strings.HasPrefix(trimmed, "```") {
+		if after, ok := strings.CutPrefix(trimmed, "```"); ok {
 			if !inFence {
 				inFence = true
-				fenceLang = strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+				fenceLang = strings.TrimSpace(after)
 				if idx := strings.IndexByte(fenceLang, ' '); idx >= 0 {
 					fenceLang = fenceLang[:idx]
 				}
@@ -121,8 +120,8 @@ func RenderMarkdownWithCodeBlocks(text string, width int, t Theme, cfg UIConfig,
 		}
 
 		// 引用块
-		if strings.HasPrefix(trimmed, ">") {
-			quoteBody := strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+		if after, ok := strings.CutPrefix(trimmed, ">"); ok {
+			quoteBody := strings.TrimSpace(after)
 			styled := t.Fg(t.BorderMuted, "▎ ") + t.ItalicFg(t.Muted, renderInlineMarkdown(quoteBody, t, cfg))
 			out = append(out, wrapStyledLine(styled, width)...)
 			continue

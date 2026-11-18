@@ -91,7 +91,6 @@ func TestInteractiveRunner_TC_TUI_013_HeadlessPipeline(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Helper()
 			memStore := storage.NewMemoryStorage()

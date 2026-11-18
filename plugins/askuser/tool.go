@@ -159,10 +159,10 @@ func (t *AskUserQuestionTool) Execute(ctx *tools.ToolContext, args json.RawMessa
 		return &tools.ToolResult{
 			Content: BuildQuestionnaireResponse(res, in.Questions),
 		}, nil
-	case <-ctx.Context.Done():
+	case <-ctx.Done():
 		return &tools.ToolResult{
 			Content: DeclineMessage,
-		}, ctx.Context.Err()
+		}, ctx.Err()
 	}
 }
 

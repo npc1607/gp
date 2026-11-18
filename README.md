@@ -21,6 +21,8 @@
 - **模块化编辑器与状态栏（`pi-zentui`）**
   - **Opencode Editor**：上下分割线 + 左侧 Accent Rail `│` + 上下留白 + 底部模型/Provider/Thinking 元数据行；运行中将 **Working Line**（内置 `claude-inspired`、`braille`、`star-bloom`、`pinwheel`、`pulse` 五套动画）直接嵌入顶边框。
   - **Starship Footer**：实时展示目录名、Git 分支与工作区脏状态（`*`）、Go 运行时版本、上下文占用（`ctx: X/128k`）、`↑in ↓out` Token 统计、费用与会话时长。
+  - **输入指令总线队列（`InputBus`）**：Agent 运行期间允许持续输入并入队，支持 `Esc` 实时中断当前推理、`Alt/Cmd+↑` 回退未处理指令到输入框、`Ctrl+E`（及轮次正常结束自动出队）将多条待处理指令挤压合并为单条执行。
+  - **可扩展快捷键注册中心（`KeymapRegistry`）**：所有终端快捷键统一注册绑定与条件分发，支持按 ID/按键查询与动态重绑定。
   - **实时切换预设**：输入 `/zentui preset opencode|rail|minimalist` 或 `/tidy` 即可即时调整界面布局。
 
 ### 2. 协程级子 Agent 与实时数据流可视化
@@ -49,13 +51,20 @@
 
 | 快捷键 / 指令 | 作用 |
 | --- | --- |
-| `Enter` | 发送消息或执行内置 UI 指令 |
+| `Enter` | 发送消息或执行内置 UI 指令（Agent 运行中自动入队） |
+| `Esc` | 运行中立即中断当前推理；空闲时回退队列指令或清空输入框 |
+| `Alt/Cmd+↑` (`Ctrl+↑`) | 将最新一条未处理队列指令回退到输入框 |
+| `Ctrl+E` | 将队列中多条待处理指令原地挤压合并为 1 条 |
+| `Ctrl+S` | 将当前模型保存为全局默认启动模型 |
 | `Ctrl+O` | 展开 / 折叠所有 Turn 与工具调用详情 |
 | `Ctrl+T` | 展开 / 折叠最近一条 Thinking 思考框 |
 | `Ctrl+G` | 打开 / 关闭左侧 DAG 任务拓扑侧栏（存在子任务时可用） |
+| `Ctrl+]` | 在 `AskUser` 交互式问卷弹窗打开时折叠 / 展开弹窗 |
 | `Tab` / `Shift+Tab` | 在 `root` 与各子 Agent 视图间循环切换 |
 | `Up` / `Down` / `PgUp` / `PgDown` / 滚轮 | 滚动对话视口 |
 | 鼠标左键点击 | 点击 Turn 摘要、工具组标题或单行工具原地展开/折叠 |
+| `/models` / `/login` / `/logout` | 选择切换模型或管理 Provider 登录态 |
+| `/resume` | 浏览并恢复历史 SQLite 会话 |
 | `/zentui preset opencode\|rail\|minimalist` | 实时切换编辑器、用户消息与状态栏样式预设 |
 | `/tidy` / `/tidy turn` | 开关 Turn 自动折叠 / 手动切换最近一轮折叠 |
 | `/clear` | 清空当前 Agent 缓冲区 |
@@ -77,10 +86,11 @@
 │   │   └── task/           # 任务所有权树与 Checkpoint 重放状态机
 │   ├── extensions/js/      # Goja JS 扩展引擎
 │   ├── mcp/                # MCP 客户端与工具桥接
-│   ├── modes/              # interactive (TUI) / print (-p) / resume 运行模式
+│   ├── modes/              # interactive (TUI) / print (-p) / resume / subagent 装配桥接
 │   ├── scheduler/          # Governor 限流、Blackboard 黑板与 Task DAG 调度器
-│   ├── tools/builtin/      # read / write / edit / bash / subagent / ask_peer 及执行接线
-│   └── tui/                # pi-tidy + pi-zentui 原生终端渲染引擎
+│   ├── tools/builtin/      # read / write / edit / bash / subagent / ask_peer 内置工具
+│   └── tui/                # pi-tidy + pi-zentui 渲染引擎、InputBus 队列与 KeymapRegistry 注册中心
+├── plugins/                # askuser 交互问卷 / qoder 鉴权与推理插件
 └── docs/                   # 技术方案文档
 ```
 
@@ -91,6 +101,9 @@
 ### 1. 测试与编译
 
 ```bash
+# 运行静态检查与 Lint (go vet + golangci-lint)
+make lint
+
 # 运行全量单元测试与竞态检测 (-race)
 make test
 

@@ -461,7 +461,7 @@ func TestMCP_TC_MCP_005_PipeBreakAndCleanup(t *testing.T) {
 	errs := make([]error, concurrentCalls)
 
 	// Don't respond, instead simulate abrupt pipe break after calls are queued
-	for i := 0; i < concurrentCalls; i++ {
+	for i := range concurrentCalls {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

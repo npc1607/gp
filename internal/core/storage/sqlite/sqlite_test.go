@@ -231,12 +231,12 @@ func TestSqliteStorage_TC_STOR_03_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, numGoroutines*opsPerGoroutine*2)
 
-	for g := 0; g < numGoroutines; g++ {
+	for g := range numGoroutines {
 		wg.Add(1)
 		gID := g
 		go func() {
 			defer wg.Done()
-			for i := 0; i < opsPerGoroutine; i++ {
+			for i := range opsPerGoroutine {
 				taskID := fmt.Sprintf("task_g%d_op%d", gID, i)
 				sessionID := fmt.Sprintf("sess_g%d", gID)
 

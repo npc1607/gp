@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"gp/internal/ai"
+	_ "gp/internal/ai/providers/openai"
 	"gp/internal/core/auth"
 	"gp/internal/core/storage"
-	_ "gp/internal/ai/providers/openai"
 	_ "gp/plugins/qoder"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -190,7 +190,6 @@ func TestTUI_TC_TUI_004_SingleOrEmptyTabBoundary(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			m := createTestMainUIModel(t, nil)
 			tc.setupModel(m)
@@ -311,7 +310,6 @@ func TestTUI_TC_TUI_007_WindowResizeClampProtection(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			m := createTestMainUIModel(t, nil)
 			defer func() {
@@ -408,7 +406,7 @@ func TestTUI_TC_TUI_010_ViewportIndependentScroll(t *testing.T) {
 	// 给 main Tab 注入 100 行输出
 	var lines strings.Builder
 	for i := 1; i <= 100; i++ {
-		lines.WriteString(fmt.Sprintf("Line %03d: output log entry\n", i))
+		fmt.Fprintf(&lines, "Line %03d: output log entry\n", i)
 	}
 	_, _ = m.Update(AgentStreamDeltaMsg{
 		AgentID:   PrimaryAgentID,
@@ -456,7 +454,7 @@ func TestTUI_TC_TUI_010_ViewportIndependentScroll(t *testing.T) {
 
 	// 4. KeyPgDown (+5)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
-	m = updated.(*MainUIModel)
+	_ = updated.(*MainUIModel)
 	if got, want := mainBuf.Viewport.YOffset, initMainYOffset; got != want {
 		t.Fatalf("%s(KeyPgDown): mainBuf YOffset got %d, want %d", fn, got, want)
 	}
@@ -568,7 +566,6 @@ func TestTUI_DAGTree_BadgeRendering_TableDriven(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Helper()
 			got := tree.renderBadge(&tc.input)

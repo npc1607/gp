@@ -9,14 +9,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var (
-	styleTrayHeader = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-	styleTrayRole   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	styleTrayDesc   = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	styleTrayTime   = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	styleTrayMuted  = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-)
-
 // ActiveCoroutineItem 描述单个活跃协程的运行状态
 type ActiveCoroutineItem struct {
 	AgentID  string
