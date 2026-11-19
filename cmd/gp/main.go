@@ -17,6 +17,7 @@ import (
 	"gp/internal/modes"
 	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
+	"gp/internal/modes/rpc"
 	_ "gp/plugins/askuser" // 挂载 rpiv-ask-user-question 插件
 	_ "gp/plugins/qoder"   // 挂载 Qoder Provider 插件
 )
@@ -36,6 +37,7 @@ var (
 	flagDB      = flag.String("db", defaultDBPath(), "SQLite 数据库路径")
 	flagModel   = flag.String("model", "", "指定模型标识 (如 antigravity/gemini-4-argon)")
 	flagTools   = flag.String("tools", "", "工具白名单列表 (逗号分隔)")
+	flagListen  = flag.String("listen", "", "RPC/AGP 模式监听地址 (如 unix:///tmp/gp-agent.sock 或 tcp://127.0.0.1:9527)")
 	flagDebug   = flag.Bool("debug", false, "启用调试日志输出到 ./logs 目录")
 	flagVersion = flag.Bool("v", false, "查看版本号")
 )
@@ -78,6 +80,48 @@ func main() {
 		fmt.Fprintf(os.Stderr, "警告: 加载配置文件失败 (%v)，使用默认配置\n", err)
 		defaultCfg := settings.DefaultSettings()
 		cfg = &defaultCfg
+	}
+
+	// 0. 处理 serve 子命令 (如: gp serve --listen unix:///tmp/gp-agent.sock)
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
+		serveListen := serveCmd.String("listen", "unix:///tmp/gp-agent.sock", "AGP 协议监听地址")
+		serveDB := serveCmd.String("db", defaultDBPath(), "SQLite 数据库路径")
+		serveModel := serveCmd.String("model", "", "指定模型标识")
+		serveTools := serveCmd.String("tools", "", "工具白名单列表")
+		_ = serveCmd.Parse(os.Args[2:])
+
+		var allowlist []string
+		if *serveTools != "" {
+			for t := range strings.SplitSeq(*serveTools, ",") {
+				if trimmed := strings.TrimSpace(t); trimmed != "" {
+					allowlist = append(allowlist, trimmed)
+				}
+			}
+		}
+
+		modelName := *serveModel
+		if modelName == "" {
+			modelName = cfg.Model
+		}
+
+		runner := &modes.RPCRunner{
+			Endpoint: *serveListen,
+			Opts: rpc.RunnerOptions{
+				ModelName:     modelName,
+				ToolAllowlist: allowlist,
+				DBPath:        *serveDB,
+				Settings:      cfg,
+				SettingsMgr:   settingsMgr,
+				AgentVersion:  Version,
+			},
+		}
+
+		if err := runner.Run(ctx, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "AGP 服务运行错误: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// 1. 处理 resume 子命令 (如: gp resume [session_id] [-db ...] [-model ...] [-tools ...])
@@ -203,6 +247,24 @@ func main() {
 
 		if err := runner.Run(ctx, prompt); err != nil {
 			fmt.Fprintf(os.Stderr, "运行错误: %v\n", err)
+			os.Exit(1)
+		}
+
+	case modes.ModeRPC:
+		runner := &modes.RPCRunner{
+			Endpoint: *flagListen,
+			Opts: rpc.RunnerOptions{
+				ModelName:     modelName,
+				ToolAllowlist: allowlist,
+				DBPath:        *flagDB,
+				Settings:      cfg,
+				SettingsMgr:   settingsMgr,
+				AgentVersion:  Version,
+			},
+		}
+
+		if err := runner.Run(ctx, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "RPC 服务运行错误: %v\n", err)
 			os.Exit(1)
 		}
 

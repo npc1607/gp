@@ -115,8 +115,8 @@ func NewSessionTree(sessionID string, store storage.Storage) (*SessionTree, erro
 		return st, nil
 	}
 
-	// 尚无记录，初始化根节点并落盘
-	rootID := "entry_root"
+	// 尚无记录，初始化根节点并落盘（带 sessionID 后缀避免多会话共用同一 SQLite 时主键冲突）
+	rootID := fmt.Sprintf("entry_root_%s_%d", sessionID, entrySeq.Add(1))
 	now := time.Now()
 	root := &SessionEntry{
 		ID:        rootID,

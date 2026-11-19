@@ -10,12 +10,14 @@ import (
 
 	"gp/internal/agent"
 	"gp/internal/ai"
+	_ "gp/internal/ai/providers/anthropic"
 	"gp/internal/ai/providers/openai"
 	"gp/internal/core/storage/sqlite"
 	"gp/internal/extensions/js"
 	"gp/internal/mcp"
 	"gp/internal/modes/interactive"
 	"gp/internal/modes/print"
+	"gp/internal/modes/rpc"
 	"gp/internal/modes/subagent"
 	"gp/internal/tools/builtin"
 )
@@ -56,6 +58,21 @@ type InteractiveRunner struct {
 func (i *InteractiveRunner) Run(ctx context.Context, initialPrompt string) error {
 	runner := interactive.NewRunner(i.Opts)
 	return runner.Run(ctx, initialPrompt)
+}
+
+// RPCRunner JSON-RPC / AGP 自定义协议服务运行器
+type RPCRunner struct {
+	Opts     rpc.RunnerOptions
+	Endpoint string // 为空时走 stdio；非空时支持 unix:// 或 tcp://
+}
+
+// Run 启动 RPC / AGP 服务端
+func (r *RPCRunner) Run(ctx context.Context, _ string) error {
+	srv := rpc.NewServer(r.Opts)
+	if r.Endpoint != "" {
+		return srv.ServeListen(ctx, r.Endpoint)
+	}
+	return srv.ServeStdio(ctx)
 }
 
 // ResumeRunnerOptions 断点恢复运行器参数

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"gp/internal/ai"
 )
@@ -22,6 +24,121 @@ func TestCosyEncodeDecodeRoundTrip(t *testing.T) {
 	}
 	if string(dec) != string(orig) {
 		t.Fatalf("roundtrip mismatch: got %q, want %q", string(dec), string(orig))
+	}
+}
+
+func TestResolveExpiry_UnitAdaptive(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		expiresIn   int64
+		expiresInMs int64
+		want        time.Duration
+	}{
+		{"seconds 3600", 3600, 0, time.Hour},
+		{"milliseconds 3600000", 3600000, 0, time.Hour},
+		{"explicit ms field wins", 3600, 7200000, 2 * time.Hour},
+		{"seconds 900", 900, 0, 15 * time.Minute},
+		{"tiny ms value clamped to min", 0, 500, minTokenTTL},
+		{"absent falls back to default", 0, 0, defaultTokenTTL},
+		{"huge value clamped to max", 9_999_999_999, 0, maxTokenTTL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveExpiry(now, tc.expiresIn, tc.expiresInMs).Sub(now)
+			if got != tc.want {
+				t.Fatalf("resolveExpiry(expires_in=%d, expires_in_ms=%d) = %v, want %v",
+					tc.expiresIn, tc.expiresInMs, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExchangePAT_AggregatesAllRealmErrors(t *testing.T) {
+	newFailing := func(realm string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, `{"errorCode":"BadRequest","errorMessage":"%s says no","requestId":"rid-%s"}`, realm, realm)
+		}))
+	}
+	intl, cn := newFailing("intl"), newFailing("cn")
+	defer intl.Close()
+	defer cn.Close()
+
+	prov := NewProvider("pt-mock-pat")
+	prov.SetHTTPClient(intl.Client())
+	prov.SetRealms([]realmEndpoint{
+		{Name: "intl", OpenAPI: intl.URL, Gateway: intl.URL, UA: "Qoder/1.1.75"},
+		{Name: "cn", OpenAPI: cn.URL, Gateway: cn.URL, UA: "QoderWork/1.1.75"},
+	})
+
+	_, err := prov.StreamChat(context.Background(), &ai.ChatRequest{
+		Model:    "auto",
+		Messages: []ai.Message{ai.NewUserMessage("hi")},
+	})
+	if err == nil {
+		t.Fatal("expected exchange failure, got nil")
+	}
+	// 两个 realm 的原因都必须保留：只留最后一个会让排查时看不到 intl 的真实错误。
+	for _, want := range []string{"realm intl", "realm cn", "intl says no", "cn says no"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("aggregated error missing %q: %v", want, err)
+		}
+	}
+}
+
+func TestExchangePAT_NonPATCredentialGetsHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	prov := NewProvider("sk-not-a-pat")
+	prov.SetHTTPClient(srv.Client())
+	prov.SetRealms([]realmEndpoint{{Name: "cn", OpenAPI: srv.URL, Gateway: srv.URL, UA: "QoderWork/1.1.75"}})
+
+	_, err := prov.StreamChat(context.Background(), &ai.ChatRequest{
+		Model:    "auto",
+		Messages: []ai.Message{ai.NewUserMessage("hi")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "pt- 开头") {
+		t.Fatalf("expected pt- PAT hint, got: %v", err)
+	}
+}
+
+func TestProvider_AuthFailureBackoff(t *testing.T) {
+	var exchanges int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == pathJobExchange {
+			atomic.AddInt32(&exchanges, 1)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	prov := NewProvider("pt-mock-pat")
+	prov.SetHTTPClient(srv.Client())
+	prov.SetRealms([]realmEndpoint{{Name: "cn", OpenAPI: srv.URL, Gateway: srv.URL, UA: "QoderWork/1.1.75"}})
+
+	req := &ai.ChatRequest{Model: "auto", Messages: []ai.Message{ai.NewUserMessage("hi")}}
+	for range 3 {
+		if _, err := prov.StreamChat(context.Background(), req); err == nil {
+			t.Fatal("expected failure")
+		}
+	}
+	if got := atomic.LoadInt32(&exchanges); got != 1 {
+		t.Fatalf("expected 1 exchange attempt within backoff window, got %d", got)
+	}
+
+	// 显式强制刷新必须绕过冷却，否则用户换完凭证还要等 30 秒。
+	if _, err := prov.getAuth(context.Background(), true); err == nil {
+		t.Fatal("expected forced refresh to fail")
+	}
+	if got := atomic.LoadInt32(&exchanges); got != 2 {
+		t.Fatalf("expected forced refresh to hit upstream, got %d exchanges", got)
 	}
 }
 

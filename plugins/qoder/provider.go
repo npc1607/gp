@@ -19,6 +19,10 @@ var _ ai.Provider = (*Provider)(nil)
 
 const chatPath = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 
+// authFailureBackoff 是凭证兑换失败后的冷却时间。
+// 无效 PAT 会让每轮对话都重新打一次兑换接口（每个 realm 一次），既拖慢首字又容易被上游风控。
+const authFailureBackoff = 30 * time.Second
+
 // Provider 实现基于 Qoder 原生上游协议（PAT -> jobToken -> COSY 签名 + SSE Envelope）的大模型驱动
 type Provider struct {
 	pat        string
@@ -28,6 +32,9 @@ type Provider struct {
 	mu        sync.Mutex
 	cached    *exchangedAuth
 	sessionID string
+
+	authErr   error
+	authErrAt time.Time
 }
 
 // NewProvider 创建 Qoder 原生协议 Provider 实例
@@ -62,14 +69,21 @@ func (p *Provider) Name() string {
 func (p *Provider) getAuth(ctx context.Context, forceRefresh bool) (*exchangedAuth, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !forceRefresh && p.cached != nil && time.Now().Before(p.cached.Expires.Add(-1*time.Minute)) {
-		return p.cached, nil
+	if !forceRefresh {
+		if p.cached != nil && time.Now().Before(p.cached.Expires.Add(-1*time.Minute)) {
+			return p.cached, nil
+		}
+		if p.authErr != nil && time.Since(p.authErrAt) < authFailureBackoff {
+			return nil, p.authErr
+		}
 	}
 	ex, err := exchangePAT(ctx, p.httpClient, p.pat, p.realms)
 	if err != nil {
+		p.cached = nil
+		p.authErr, p.authErrAt = err, time.Now()
 		return nil, err
 	}
-	p.cached = ex
+	p.cached, p.authErr = ex, nil
 	return ex, nil
 }
 

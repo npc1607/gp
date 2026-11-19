@@ -9,6 +9,7 @@ import (
 
 	"gp/internal/agent"
 	"gp/internal/ai"
+	_ "gp/internal/ai/providers/anthropic"
 	"gp/internal/ai/providers/openai"
 	"gp/internal/core/auth"
 	"gp/internal/core/resources"
