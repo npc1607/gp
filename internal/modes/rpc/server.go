@@ -57,17 +57,19 @@ type Server struct {
 	cancels     map[string]context.CancelFunc
 	approvals   map[string]chan bool
 	approvalSeq atomic.Uint64
-	auditCache  *auditCache
+	auditCache    *auditCache
+	approvedCache *auditCache
 }
 
 // NewServer creates a new AGP RPC Server.
 func NewServer(opts RunnerOptions) *Server {
 	return &Server{
-		opts:       opts,
-		sessionGen: make(map[string]int),
-		cancels:    make(map[string]context.CancelFunc),
-		approvals:  make(map[string]chan bool),
-		auditCache: newAuditCache(30 * time.Minute),
+		opts:          opts,
+		sessionGen:    make(map[string]int),
+		cancels:       make(map[string]context.CancelFunc),
+		approvals:     make(map[string]chan bool),
+		auditCache:    newAuditCache(30 * time.Minute),
+		approvedCache: newAuditCache(5 * time.Minute),
 	}
 }
 
@@ -358,14 +360,27 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 	}
 
 	allowApproval := req.Options != nil && req.Options.AllowApproval
+	senderID := ""
+	isBoss := false
+	if req.Options != nil {
+		senderID = req.Options.SenderID
+		isBoss = req.Options.IsBoss
+	}
+	if senderID == "" && req.Metadata != nil {
+		senderID = req.Metadata["sender_id"]
+	}
 	reg = wrapRegistryWithRiskGuard(reg, &riskGuard{
 		prov:          prov,
 		modelName:     modelName,
 		userPrompt:    prompt,
 		workDir:       cwd,
+		sessionID:     req.SessionID,
+		senderID:      senderID,
+		isBoss:        isBoss,
 		reqID:         req.ID,
 		emit:          emit,
 		cache:         s.auditCache,
+		approvedCache: s.approvedCache,
 		allowApproval: allowApproval,
 		requestApproval: func(apCtx context.Context, toolName, reason string, rawArgs json.RawMessage) (bool, error) {
 			return s.requestApproval(apCtx, req.ID, emit, toolName, reason, rawArgs)

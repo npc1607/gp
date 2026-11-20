@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,11 +80,27 @@ type riskGuard struct {
 	modelName       string
 	userPrompt      string
 	workDir         string
+	sessionID       string
+	senderID        string
+	isBoss          bool
 	reqID           string
 	emit            func(Event)
 	cache           *auditCache
+	approvedCache   *auditCache
 	allowApproval   bool
 	requestApproval func(ctx context.Context, toolName, reason string, rawArgs json.RawMessage) (bool, error)
+}
+
+func (g *riskGuard) scopePrefix() string {
+	who := strings.TrimSpace(g.senderID)
+	if who == "" {
+		who = "anon"
+	}
+	role := "member"
+	if g.isBoss {
+		role = "boss"
+	}
+	return fmt.Sprintf("%s:%s:%s:%s", who, role, strings.TrimSpace(g.workDir), strings.TrimSpace(g.sessionID))
 }
 
 func wrapRegistryWithRiskGuard(reg *tools.Registry, guard *riskGuard) *tools.Registry {
@@ -150,8 +167,17 @@ func (g *guardedTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (
 
 	if !verdict.Allow || strings.EqualFold(verdict.RiskLevel, "high") {
 		if verdict.CanApprove && g.guard.allowApproval && g.guard.requestApproval != nil {
+			apprKey := buildApprovalCacheKey(g.guard.scopePrefix(), g.inner.Name(), rawArgs, workDir)
+			if apprKey != "" && g.guard.approvedCache != nil {
+				if _, ok := g.guard.approvedCache.get(apprKey); ok {
+					return g.inner.Execute(ctx, rawArgs)
+				}
+			}
 			approved, apprErr := g.guard.requestApproval(ctx.Context, g.inner.Name(), verdict.Reason, rawArgs)
 			if apprErr == nil && approved {
+				if apprKey != "" && g.guard.approvedCache != nil {
+					g.guard.approvedCache.set(apprKey, &riskVerdict{Allow: true})
+				}
 				return g.inner.Execute(ctx, rawArgs)
 			}
 			if apprErr != nil {
@@ -298,25 +324,171 @@ func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage, wo
 		return true
 	}
 
-	// Any chaining, file redirection, subshell, or newline goes through audit
-	for _, token := range []string{";", "&&", "||", ">", ">>", "<", "$(", "`", "\n"} {
-		if strings.Contains(cmd, token) {
-			return false
-		}
+	segments, ok := splitShellSegments(cmd)
+	if !ok || len(segments) == 0 {
+		return false
 	}
-
-	// Support safe read-only pipelines (e.g., git log | head -n 20)
-	segments := strings.Split(cmd, "|")
-	for i, seg := range segments {
-		if !isSafeSingleCommand(strings.TrimSpace(seg), i > 0, workDir) {
+	for _, seg := range segments {
+		if !isSafeSingleCommand(seg.cmd, seg.isPipeSink, workDir) {
 			return false
 		}
 	}
 	return true
 }
 
+type shellSegment struct {
+	cmd        string
+	isPipeSink bool
+}
+
+// splitShellSegments splits a shell command on unquoted |, &&, ||, and ; while
+// rejecting unquoted redirections, subshells, and newlines.
+func splitShellSegments(cmd string) ([]shellSegment, bool) {
+	var segments []shellSegment
+	var buf strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+	nextPipeSink := false
+
+	flush := func(isPipe bool) {
+		part := strings.TrimSpace(buf.String())
+		buf.Reset()
+		if part != "" {
+			segments = append(segments, shellSegment{cmd: part, isPipeSink: nextPipeSink})
+		}
+		nextPipeSink = isPipe
+	}
+
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+		if escaped {
+			buf.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			buf.WriteByte(ch)
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			buf.WriteByte(ch)
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			buf.WriteByte(ch)
+			continue
+		}
+		if inSingle || inDouble {
+			buf.WriteByte(ch)
+			continue
+		}
+
+		// Outside quotes: check unsafe operators
+		switch ch {
+		case '\n', '\r', '>', '<', '`':
+			return nil, false
+		case '$':
+			if i+1 < len(cmd) && cmd[i+1] == '(' {
+				return nil, false
+			}
+			buf.WriteByte(ch)
+		case ';':
+			flush(false)
+		case '&':
+			if i+1 < len(cmd) && cmd[i+1] == '&' {
+				i++
+				flush(false)
+			} else {
+				// Backgrounding '&' goes through audit
+				return nil, false
+			}
+		case '|':
+			if i+1 < len(cmd) && cmd[i+1] == '|' {
+				i++
+				flush(false)
+			} else {
+				flush(true)
+			}
+		default:
+			buf.WriteByte(ch)
+		}
+	}
+
+	if inSingle || inDouble {
+		return nil, false
+	}
+	flush(false)
+	return segments, true
+}
+
+// splitCommandFields tokenizes a single command respecting single/double quotes and backslash escapes.
+func splitCommandFields(cmd string) []string {
+	var fields []string
+	var buf strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+	hasToken := false
+
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+		if escaped {
+			buf.WriteByte(ch)
+			escaped = false
+			hasToken = true
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			escaped = true
+			hasToken = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			hasToken = true
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			hasToken = true
+			continue
+		}
+		if !inSingle && !inDouble && (ch == ' ' || ch == '\t') {
+			if hasToken {
+				fields = append(fields, buf.String())
+				buf.Reset()
+				hasToken = false
+			}
+			continue
+		}
+		buf.WriteByte(ch)
+		hasToken = true
+	}
+	if hasToken {
+		fields = append(fields, buf.String())
+	}
+	return fields
+}
+
+func isReadOnlySed(fields []string) bool {
+	hasSilent := false
+	for _, f := range fields[1:] {
+		if f == "--in-place" || strings.HasPrefix(f, "--in-place=") || f == "-i" || strings.HasPrefix(f, "-i") {
+			return false
+		}
+		if f == "-n" || f == "--quiet" || f == "--silent" {
+			hasSilent = true
+		}
+	}
+	return hasSilent
+}
+
 func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
-	fields := strings.Fields(cmd)
+	fields := splitCommandFields(cmd)
 	if len(fields) == 0 {
 		return true
 	}
@@ -326,6 +498,8 @@ func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
 		switch bin {
 		case "head", "tail", "grep", "rg", "wc", "sort", "uniq", "cut", "tr":
 			return true
+		case "sed":
+			return isReadOnlySed(fields)
 		default:
 			return false
 		}
@@ -358,6 +532,20 @@ func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
 			}
 		}
 		return checkArgsWithinBoundary(fields[1:])
+	case "sed":
+		if !isReadOnlySed(fields) {
+			return false
+		}
+		return checkArgsWithinBoundary(fields[1:])
+	case "cd":
+		if len(fields) == 1 {
+			return false
+		}
+		if len(fields) == 2 {
+			abs := resolveTargetPath(fields[1], workDir)
+			return isTempPath(abs) || isWithinWorkDir(abs, workDir)
+		}
+		return false
 	case "git":
 		if len(fields) >= 2 {
 			switch fields[1] {
@@ -460,7 +648,8 @@ func staticRiskVerdict(toolName string, rawArgs json.RawMessage, workDir string)
 	// Out-of-workspace path reference in bash triggers admin approval
 	for _, f := range fields {
 		cleanTok := strings.Trim(f, `"'(),;`)
-		if strings.HasPrefix(cleanTok, "/") || strings.HasPrefix(cleanTok, "~/") || cleanTok == "~" {
+		hasTraversal := cleanTok == ".." || strings.HasPrefix(cleanTok, "../") || strings.Contains(cleanTok, "/../") || strings.HasSuffix(cleanTok, "/..")
+		if strings.HasPrefix(cleanTok, "/") || strings.HasPrefix(cleanTok, "~/") || cleanTok == "~" || hasTraversal {
 			// Allow standard system binaries like /opt/homebrew/bin/..., /usr/bin/... as executable prefix (index 0),
 			// but check data/path arguments against workDir & temp dirs.
 			if cleanTok == fields[0] && (strings.HasPrefix(cleanTok, "/usr/") || strings.HasPrefix(cleanTok, "/bin/") || strings.HasPrefix(cleanTok, "/opt/homebrew/")) {
@@ -481,10 +670,195 @@ func staticRiskVerdict(toolName string, rawArgs json.RawMessage, workDir string)
 	return nil, false
 }
 
+// extractResourceID extracts a remote resource identifier (e.g., document_id, wiki_token, chat_id, url host)
+// for non-filesystem tools such as MCP or network tools.
+func extractResourceID(rawArgs json.RawMessage) string {
+	var args map[string]any
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return ""
+	}
+	for _, key := range []string{
+		"document_id", "doc_id", "wiki_token", "node_token",
+		"spreadsheet_token", "app_token", "table_id", "chat_id",
+	} {
+		if v, ok := args[key].(string); ok && strings.TrimSpace(v) != "" {
+			return key + "=" + strings.TrimSpace(v)
+		}
+	}
+	if rawURL, ok := args["url"].(string); ok && strings.TrimSpace(rawURL) != "" {
+		if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil && u.Host != "" {
+			return "host=" + u.Scheme + "://" + u.Host
+		}
+	}
+	return ""
+}
+
+func isResourceCacheExcludedTool(lowerTool string) bool {
+	for _, kw := range []string{"delete", "remove", "drop", "send", "mail", "purge", "destroy"} {
+		if strings.Contains(lowerTool, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildApprovalCacheKey builds a short-lived key after an admin approves an action
+// so repeated accesses to the same approved directory/resource within the same scope don't re-prompt.
+// Destructive commands (like rm) are intentionally never cached.
+func buildApprovalCacheKey(scope, toolName string, rawArgs json.RawMessage, workDir string) string {
+	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
+	switch lowerTool {
+	case "read", "grep", "find", "ls":
+		if target := extractToolPath(rawArgs); target != "" {
+			abs := resolveTargetPath(target, workDir)
+			return scope + ":appr:fs-read:" + filepath.Dir(abs)
+		}
+		return ""
+	case "write", "edit":
+		if target := extractToolPath(rawArgs); target != "" {
+			abs := resolveTargetPath(target, workDir)
+			return scope + ":appr:" + lowerTool + ":" + abs
+		}
+		return ""
+	case "bash":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return ""
+		}
+		cmd := strings.TrimSpace(args.Command)
+		fields := splitCommandFields(cmd)
+		if len(fields) > 0 && fields[0] == "rm" {
+			return ""
+		}
+		if cmd == "" {
+			return ""
+		}
+		return scope + ":appr:bash:" + cmd
+	default:
+		if isResourceCacheExcludedTool(lowerTool) {
+			return ""
+		}
+		if resID := extractResourceID(rawArgs); resID != "" {
+			return scope + ":appr:" + lowerTool + ":" + resID
+		}
+		return ""
+	}
+}
+
+// buildNormalizedCacheKey computes a safe normalized cache key scoped to (who, workDir, sessionID)
+// for commands/tools whose risk profile depends on the command/subcommand/flags, target file path,
+// or remote resource ID rather than search keywords, line ranges, or edited content.
+// Interpreters/shells (python, bash -c, etc.) are intentionally excluded and always keyed by exact rawArgs.
+func buildNormalizedCacheKey(scope, toolName string, rawArgs json.RawMessage, workDir string) string {
+	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
+	if lowerTool == "write" || lowerTool == "edit" {
+		if target := extractToolPath(rawArgs); target != "" {
+			abs := resolveTargetPath(target, workDir)
+			if isTempPath(abs) || isWithinWorkDir(abs, workDir) {
+				return scope + ":" + lowerTool + ":path:" + abs
+			}
+		}
+		return ""
+	}
+	if lowerTool != "bash" {
+		if !isResourceCacheExcludedTool(lowerTool) {
+			if resID := extractResourceID(rawArgs); resID != "" {
+				return scope + ":" + lowerTool + ":res:" + resID
+			}
+		}
+		return ""
+	}
+
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return ""
+	}
+	cmd := strings.TrimSpace(args.Command)
+	cmd = strings.ReplaceAll(cmd, "2>&1", "")
+	cmd = strings.ReplaceAll(cmd, "2>/dev/null", "")
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+
+	segments, ok := splitShellSegments(cmd)
+	if !ok || len(segments) == 0 {
+		return ""
+	}
+
+	var sigParts []string
+	for _, seg := range segments {
+		sig := normalizeCommandSignature(seg.cmd)
+		if sig == "" {
+			return ""
+		}
+		sigParts = append(sigParts, sig)
+	}
+	return scope + ":bash:sig:" + strings.Join(sigParts, "|")
+}
+
+func normalizeCommandSignature(cmd string) string {
+	fields := splitCommandFields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	bin := filepath.Base(fields[0])
+	switch bin {
+	case "grep", "rg", "ag", "cat", "head", "tail", "less", "wc",
+		"ls", "tree", "stat", "file", "diff", "sort", "uniq", "cut", "tr", "jq", "yq",
+		"pytest", "make", "cd":
+	case "sed":
+		for _, f := range fields[1:] {
+			if f == "-i" || strings.HasPrefix(f, "-i") || strings.HasPrefix(f, "--in-place") {
+				return ""
+			}
+		}
+	case "find":
+		for _, f := range fields[1:] {
+			if f == "-delete" || f == "-exec" || f == "-execdir" || f == "-ok" {
+				return ""
+			}
+		}
+	case "go", "git", "npm", "pnpm", "yarn", "cargo":
+		// Subcommand-based CLIs include the first non-flag token as subcommand
+	default:
+		return ""
+	}
+
+	var flags []string
+	subcmd := ""
+	hasSubcmdCLI := bin == "go" || bin == "git" || bin == "npm" || bin == "pnpm" || bin == "yarn" || bin == "cargo"
+	for _, f := range fields[1:] {
+		if strings.HasPrefix(f, "-") {
+			flags = append(flags, f)
+			continue
+		}
+		if hasSubcmdCLI && subcmd == "" {
+			subcmd = f
+		}
+	}
+	if subcmd != "" {
+		return bin + ":" + subcmd + ":" + strings.Join(flags, ",")
+	}
+	return bin + ":" + strings.Join(flags, ",")
+}
+
 func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.RawMessage, workDir string) (*riskVerdict, error) {
-	cacheKey := strings.ToLower(strings.TrimSpace(toolName)) + ":" + strings.TrimSpace(string(rawArgs))
+	scope := g.scopePrefix()
+	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
+	cacheKey := scope + ":" + lowerTool + ":" + strings.TrimSpace(string(rawArgs))
 	if cached, ok := g.cache.get(cacheKey); ok {
 		return cached, nil
+	}
+	normKey := buildNormalizedCacheKey(scope, lowerTool, rawArgs, workDir)
+	if normKey != "" {
+		if cached, ok := g.cache.get(normKey); ok {
+			return cached, nil
+		}
 	}
 
 	started := time.Now()
@@ -526,8 +900,15 @@ func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.Ra
 必须严格只输出以下格式的合法 JSON（不要输出 markdown 代码块外的任何多余文字）：
 {"risk_level":"high|medium|low","allow":true|false,"can_approve":true|false,"reason":"简明中文原因","required_permission":"如拒绝，说明所需权限"}`)
 
-	auditPrompt := fmt.Sprintf("用户原始请求：%s\n\n待审计工具：%s\n工具参数：%s\n\n请评估风险等级并给出 JSON 决策。",
-		g.userPrompt, toolName, string(rawArgs))
+	whoDesc := "普通成员"
+	if g.isBoss {
+		whoDesc = "管理员 (boss)"
+	}
+	if strings.TrimSpace(g.senderID) != "" {
+		whoDesc += " [" + strings.TrimSpace(g.senderID) + "]"
+	}
+	auditPrompt := fmt.Sprintf("发起人：%s\n用户原始请求：%s\n\n待审计工具：%s\n工具参数：%s\n\n请评估风险等级并给出 JSON 决策。",
+		whoDesc, g.userPrompt, toolName, string(rawArgs))
 
 	ans, err := reviewer.Prompt(subCtx, auditPrompt)
 	if err == nil && strings.TrimSpace(ans) == "" {
@@ -564,6 +945,9 @@ func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.Ra
 	}
 
 	g.cache.set(cacheKey, verdict)
+	if normKey != "" && verdict.Allow && !strings.EqualFold(verdict.RiskLevel, "high") {
+		g.cache.set(normKey, verdict)
+	}
 
 	if g.emit != nil {
 		if !verdict.Allow || strings.EqualFold(verdict.RiskLevel, "high") {
