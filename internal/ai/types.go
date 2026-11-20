@@ -40,24 +40,35 @@ type TokenUsage struct {
 	TotalTokens      int64 `json:"total_tokens"`
 }
 
+// ImagePart 表示随消息附带的多模态图片载荷（Base64 编码）
+type ImagePart struct {
+	MimeType   string `json:"mime_type"`
+	Base64Data string `json:"base64_data"`
+	FileName   string `json:"file_name,omitempty"`
+}
+
 // Message 通用消息结构体
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
-	Thinking   string     `json:"thinking,omitempty"` // 针对具备显式思考过程的模型 (如 Claude 3.7 / DeepSeek R1)
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"` // 当 Role == RoleTool 时关联的调用 ID
-	Timestamp  time.Time  `json:"timestamp"`
+	Role              Role        `json:"role"`
+	Content           string      `json:"content"`
+	Thinking          string      `json:"thinking,omitempty"`           // 针对具备显式思考过程的模型 (如 Claude 3.7 / DeepSeek R1)
+	ThinkingSignature string      `json:"thinking_signature,omitempty"` // Anthropic extended thinking 签名，多轮回传必须原样保留
+	Images            []ImagePart `json:"images,omitempty"`
+	ToolCalls         []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID        string      `json:"tool_call_id,omitempty"` // 当 Role == RoleTool 时关联的调用 ID
+	Timestamp         time.Time   `json:"timestamp"`
 }
 
 type messageAux struct {
-	Role             Role       `json:"role"`
-	Content          string     `json:"content"`
-	Thinking         string     `json:"thinking,omitempty"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	Timestamp        time.Time  `json:"timestamp"`
+	Role              Role        `json:"role"`
+	Content           string      `json:"content"`
+	Thinking          string      `json:"thinking,omitempty"`
+	ThinkingSignature string      `json:"thinking_signature,omitempty"`
+	Images            []ImagePart `json:"images,omitempty"`
+	ReasoningContent  string      `json:"reasoning_content,omitempty"`
+	ToolCalls         []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID        string      `json:"tool_call_id,omitempty"`
+	Timestamp         time.Time   `json:"timestamp"`
 }
 
 // UnmarshalJSON 兼容解析 thinking 与 reasoning_content 字段 (DeepSeek / OpenAI 规范)
@@ -75,6 +86,8 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	} else {
 		m.Thinking = ""
 	}
+	m.ThinkingSignature = aux.ThinkingSignature
+	m.Images = aux.Images
 	m.ToolCalls = aux.ToolCalls
 	m.ToolCallID = aux.ToolCallID
 	m.Timestamp = aux.Timestamp
@@ -121,21 +134,23 @@ func NewToolMessage(toolCallID, content string) Message {
 
 // StreamChunk 流式输出片段
 type StreamChunk struct {
-	DeltaText     string      `json:"delta_text,omitempty"`
-	ThinkingDelta string      `json:"thinking_delta,omitempty"`
-	ToolCallDelta *ToolCall   `json:"tool_call_delta,omitempty"`
-	FinishReason  string      `json:"finish_reason,omitempty"`
-	Usage         *TokenUsage `json:"usage,omitempty"`
-	Error         error       `json:"error,omitempty"`
+	DeltaText         string      `json:"delta_text,omitempty"`
+	ThinkingDelta     string      `json:"thinking_delta,omitempty"`
+	ThinkingSignature string      `json:"thinking_signature,omitempty"`
+	ToolCallDelta     *ToolCall   `json:"tool_call_delta,omitempty"`
+	FinishReason      string      `json:"finish_reason,omitempty"`
+	Usage             *TokenUsage `json:"usage,omitempty"`
+	Error             error       `json:"error,omitempty"`
 }
 
 type streamChunkAux struct {
-	DeltaText     string      `json:"delta_text,omitempty"`
-	ThinkingDelta string      `json:"thinking_delta,omitempty"`
-	ToolCallDelta *ToolCall   `json:"tool_call_delta,omitempty"`
-	FinishReason  string      `json:"finish_reason,omitempty"`
-	Usage         *TokenUsage `json:"usage,omitempty"`
-	Error         string      `json:"error,omitempty"`
+	DeltaText         string      `json:"delta_text,omitempty"`
+	ThinkingDelta     string      `json:"thinking_delta,omitempty"`
+	ThinkingSignature string      `json:"thinking_signature,omitempty"`
+	ToolCallDelta     *ToolCall   `json:"tool_call_delta,omitempty"`
+	FinishReason      string      `json:"finish_reason,omitempty"`
+	Usage             *TokenUsage `json:"usage,omitempty"`
+	Error             string      `json:"error,omitempty"`
 }
 
 // MarshalJSON 自定义序列化，将 error 接口转为字符串输出
@@ -145,12 +160,13 @@ func (c StreamChunk) MarshalJSON() ([]byte, error) {
 		errStr = c.Error.Error()
 	}
 	return json.Marshal(streamChunkAux{
-		DeltaText:     c.DeltaText,
-		ThinkingDelta: c.ThinkingDelta,
-		ToolCallDelta: c.ToolCallDelta,
-		FinishReason:  c.FinishReason,
-		Usage:         c.Usage,
-		Error:         errStr,
+		DeltaText:         c.DeltaText,
+		ThinkingDelta:     c.ThinkingDelta,
+		ThinkingSignature: c.ThinkingSignature,
+		ToolCallDelta:     c.ToolCallDelta,
+		FinishReason:      c.FinishReason,
+		Usage:             c.Usage,
+		Error:             errStr,
 	})
 }
 
@@ -162,6 +178,7 @@ func (c *StreamChunk) UnmarshalJSON(data []byte) error {
 	}
 	c.DeltaText = aux.DeltaText
 	c.ThinkingDelta = aux.ThinkingDelta
+	c.ThinkingSignature = aux.ThinkingSignature
 	c.ToolCallDelta = aux.ToolCallDelta
 	c.FinishReason = aux.FinishReason
 	c.Usage = aux.Usage

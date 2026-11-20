@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gp/internal/agent"
@@ -48,12 +49,15 @@ type RunnerOptions struct {
 
 // Server serves AGP (Agent Gateway Protocol) requests over stdio or unix/tcp sockets.
 type Server struct {
-	opts       RunnerOptions
-	store      storage.Storage
-	ownStore   bool
-	mu         sync.Mutex
-	sessionGen map[string]int
-	cancels    map[string]context.CancelFunc
+	opts        RunnerOptions
+	store       storage.Storage
+	ownStore    bool
+	mu          sync.Mutex
+	sessionGen  map[string]int
+	cancels     map[string]context.CancelFunc
+	approvals   map[string]chan bool
+	approvalSeq atomic.Uint64
+	auditCache  *auditCache
 }
 
 // NewServer creates a new AGP RPC Server.
@@ -62,6 +66,8 @@ func NewServer(opts RunnerOptions) *Server {
 		opts:       opts,
 		sessionGen: make(map[string]int),
 		cancels:    make(map[string]context.CancelFunc),
+		approvals:  make(map[string]chan bool),
+		auditCache: newAuditCache(30 * time.Minute),
 	}
 }
 
@@ -242,6 +248,8 @@ func (s *Server) dispatch(ctx context.Context, emit func(Event), req Request, wg
 			cancel()
 		}
 		emit(Event{ID: req.ID, Event: EventAbortAck})
+	case OpApprovalReply:
+		s.resolveApproval(req.ApprovalID, req.Approved)
 	case OpRun:
 		wg.Add(1)
 		go func() {
@@ -349,12 +357,19 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		return
 	}
 
+	allowApproval := req.Options != nil && req.Options.AllowApproval
 	reg = wrapRegistryWithRiskGuard(reg, &riskGuard{
-		prov:       prov,
-		modelName:  modelName,
-		userPrompt: prompt,
-		reqID:      req.ID,
-		emit:       emit,
+		prov:          prov,
+		modelName:     modelName,
+		userPrompt:    prompt,
+		workDir:       cwd,
+		reqID:         req.ID,
+		emit:          emit,
+		cache:         s.auditCache,
+		allowApproval: allowApproval,
+		requestApproval: func(apCtx context.Context, toolName, reason string, rawArgs json.RawMessage) (bool, error) {
+			return s.requestApproval(apCtx, req.ID, emit, toolName, reason, rawArgs)
+		},
 	})
 
 	_ = subagent.WireRunnerWithHooks(reg, prov, modelName, cwd, subagent.Hooks{
@@ -469,6 +484,56 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		}
 	}
 	emit(final)
+}
+
+func (s *Server) resolveApproval(approvalID string, approved bool) {
+	s.mu.Lock()
+	ch, ok := s.approvals[approvalID]
+	s.mu.Unlock()
+	if ok && ch != nil {
+		select {
+		case ch <- approved:
+		default:
+		}
+	}
+}
+
+func (s *Server) requestApproval(ctx context.Context, reqID string, emit func(Event), toolName, reason string, rawArgs json.RawMessage) (bool, error) {
+	id := fmt.Sprintf("apr_%d", s.approvalSeq.Add(1))
+	ch := make(chan bool, 1)
+
+	s.mu.Lock()
+	s.approvals[id] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.approvals, id)
+		s.mu.Unlock()
+	}()
+
+	var argsMap map[string]any
+	_ = json.Unmarshal(rawArgs, &argsMap)
+
+	emit(Event{
+		ID:         reqID,
+		Event:      EventApprovalRequest,
+		ApprovalID: id,
+		Tool:       toolName,
+		Text:       reason,
+		Args:       argsMap,
+	})
+
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case approved := <-ch:
+		return approved, nil
+	case <-timer.C:
+		return false, fmt.Errorf("等待管理员确认超时（15s）")
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 func (s *Server) resolveRegistry(cwd, homeDir string, cfg *settings.Settings, allowlist []string) (*tools.Registry, error) {

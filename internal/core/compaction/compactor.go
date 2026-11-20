@@ -40,6 +40,11 @@ func PruneToolOutputs(msgs []ai.Message, keepRecentTurns int) ([]ai.Message, int
 		if out[i].Role != ai.RoleTool {
 			continue
 		}
+		if len(out[i].Images) > 0 {
+			out[i].Images = nil
+			out[i].Content += "\n[compacted image attachment]"
+			pruned++
+		}
 		if len(out[i].Content) <= 400 {
 			continue
 		}

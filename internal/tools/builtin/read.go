@@ -1,8 +1,10 @@
 package builtin
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,8 +18,9 @@ var (
 )
 
 const (
-	maxReadLines = 2000
-	maxReadBytes = 50 * 1024 // 50KB
+	maxReadLines      = 2000
+	maxReadBytes      = 50 * 1024       // 50KB
+	maxReadImageBytes = 5 * 1024 * 1024 // 5MB
 )
 
 // ReadTool 读取文件内容，支持分页、行号格式化与防爆截断
@@ -38,7 +41,7 @@ func (r *ReadTool) Name() string {
 }
 
 func (r *ReadTool) Description() string {
-	return "Read file contents with line numbers and pagination support."
+	return "Read file contents with line numbers and pagination support, or load images (png, jpg, jpeg, webp, gif)."
 }
 
 func (r *ReadTool) InputSchema() json.RawMessage {
@@ -98,6 +101,25 @@ func (r *ReadTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*to
 	if len(data) == 0 {
 		return &tools.ToolResult{
 			Content: "(file is empty)",
+		}, nil
+	}
+
+	if mimeType := detectImageMIME(targetPath, data); mimeType != "" {
+		if len(data) > maxReadImageBytes {
+			return &tools.ToolResult{
+				Content: fmt.Sprintf("image file too large (%d bytes, max %d bytes)", len(data), maxReadImageBytes),
+				IsError: true,
+			}, nil
+		}
+		return &tools.ToolResult{
+			Content: fmt.Sprintf("[Image loaded: %s (%s, %d bytes)]", filepath.Base(targetPath), mimeType, len(data)),
+			Images: []tools.ImageAttachment{
+				{
+					MimeType:   mimeType,
+					Base64Data: base64.StdEncoding.EncodeToString(data),
+					FileName:   filepath.Base(targetPath),
+				},
+			},
 		}, nil
 	}
 
@@ -168,4 +190,25 @@ func (r *ReadTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*to
 	return &tools.ToolResult{
 		Content: sb.String(),
 	}, nil
+}
+
+func detectImageMIME(filePath string, data []byte) string {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	}
+	if len(data) > 0 {
+		detected := http.DetectContentType(data)
+		switch detected {
+		case "image/png", "image/jpeg", "image/webp", "image/gif":
+			return detected
+		}
+	}
+	return ""
 }

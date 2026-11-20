@@ -91,6 +91,7 @@ func EstimateMessageTokens(msg ai.Message) int64 {
 		total += EstimateTextTokens(string(tc.Function.Arguments))
 		total += 4
 	}
+	total += int64(len(msg.Images)) * 1000
 	return total
 }
 

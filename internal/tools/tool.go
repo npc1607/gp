@@ -25,11 +25,19 @@ type ToolEvent struct {
 	IsError  bool
 }
 
+// ImageAttachment 描述工具返回的多模态图片附件
+type ImageAttachment struct {
+	MimeType   string `json:"mime_type"`
+	Base64Data string `json:"base64_data"`
+	FileName   string `json:"file_name,omitempty"`
+}
+
 // ToolResult 工具执行输出
 type ToolResult struct {
-	Content string `json:"content"`
-	IsError bool   `json:"is_error"`
-	Details any    `json:"details,omitempty"`
+	Content string            `json:"content"`
+	Images  []ImageAttachment `json:"images,omitempty"`
+	IsError bool              `json:"is_error"`
+	Details any               `json:"details,omitempty"`
 }
 
 // Tool 工具通用契约接口

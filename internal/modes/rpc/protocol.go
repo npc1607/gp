@@ -12,22 +12,24 @@ type (
 )
 
 const (
-	OpHello        = agp.OpHello
-	OpRun          = agp.OpRun
-	OpResetSession = agp.OpResetSession
-	OpAbort        = agp.OpAbort
-	OpPing         = agp.OpPing
+	OpHello         = agp.OpHello
+	OpRun           = agp.OpRun
+	OpResetSession  = agp.OpResetSession
+	OpAbort         = agp.OpAbort
+	OpPing          = agp.OpPing
+	OpApprovalReply = agp.OpApprovalReply
 )
 
 const (
-	EventHelloAck      = agp.EventHelloAck
-	EventStarted       = agp.EventStarted
-	EventThinking      = agp.EventThinking
-	EventToolStart     = agp.EventToolStart
-	EventToolEnd       = agp.EventToolEnd
-	EventSubagentStart = agp.EventSubagentStart
-	EventSubagentEnd   = agp.EventSubagentEnd
-	EventDelta         = agp.EventDelta
+	EventHelloAck        = agp.EventHelloAck
+	EventStarted         = agp.EventStarted
+	EventThinking        = agp.EventThinking
+	EventToolStart       = agp.EventToolStart
+	EventToolEnd         = agp.EventToolEnd
+	EventSubagentStart   = agp.EventSubagentStart
+	EventSubagentEnd     = agp.EventSubagentEnd
+	EventApprovalRequest = agp.EventApprovalRequest
+	EventDelta           = agp.EventDelta
 	EventFinal         = agp.EventFinal
 	EventResetAck      = agp.EventResetAck
 	EventAbortAck      = agp.EventAbortAck

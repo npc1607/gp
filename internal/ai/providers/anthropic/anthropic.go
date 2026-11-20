@@ -226,26 +226,51 @@ func (p *Provider) buildMessages(req *ai.ChatRequest) (string, []anthropicMessag
 				systemParts = append(systemParts, msg.Content)
 			}
 		case ai.RoleTool:
+			toolContent := []map[string]any{{
+				"type": "text",
+				"text": msg.Content,
+			}}
+			for _, img := range msg.Images {
+				toolContent = append(toolContent, map[string]any{
+					"type": "image",
+					"source": map[string]any{
+						"type":       "base64",
+						"media_type": img.MimeType,
+						"data":       img.Base64Data,
+					},
+				})
+			}
 			appendBlocks(&messages, "user", []map[string]any{{
 				"type":        "tool_result",
 				"tool_use_id": msg.ToolCallID,
-				"content": []map[string]any{{
-					"type": "text",
-					"text": msg.Content,
-				}},
+				"content":     toolContent,
 			}})
 		case ai.RoleAssistant:
 			if blocks := p.assistantBlocks(msg); len(blocks) > 0 {
 				appendBlocks(&messages, "assistant", blocks)
 			}
 		default:
-			if strings.TrimSpace(msg.Content) == "" {
+			if strings.TrimSpace(msg.Content) == "" && len(msg.Images) == 0 {
 				continue
 			}
-			appendBlocks(&messages, "user", []map[string]any{{
-				"type": "text",
-				"text": msg.Content,
-			}})
+			var userBlocks []map[string]any
+			if strings.TrimSpace(msg.Content) != "" {
+				userBlocks = append(userBlocks, map[string]any{
+					"type": "text",
+					"text": msg.Content,
+				})
+			}
+			for _, img := range msg.Images {
+				userBlocks = append(userBlocks, map[string]any{
+					"type": "image",
+					"source": map[string]any{
+						"type":       "base64",
+						"media_type": img.MimeType,
+						"data":       img.Base64Data,
+					},
+				})
+			}
+			appendBlocks(&messages, "user", userBlocks)
 		}
 	}
 
@@ -261,8 +286,12 @@ func (p *Provider) assistantBlocks(msg ai.Message) []map[string]any {
 
 	blocks := make([]map[string]any, 0, len(msg.ToolCalls)+2)
 	if strings.TrimSpace(msg.Thinking) != "" {
-		// thinking 块必须带签名回传，否则协议校验失败；无签名时退化为不回传
-		if sig := p.lookupSignature(signatureKey(msg.Content, msg.Thinking, ids)); sig != "" {
+		// thinking 块必须带签名回传，否则协议校验失败；优先使用消息上持久化的 ThinkingSignature，再回退内存缓存
+		sig := msg.ThinkingSignature
+		if sig == "" {
+			sig = p.lookupSignature(signatureKey(msg.Content, msg.Thinking, ids))
+		}
+		if sig != "" {
 			blocks = append(blocks, map[string]any{
 				"type":      "thinking",
 				"thinking":  msg.Thinking,
@@ -522,6 +551,7 @@ func (s *streamState) handle(ctx context.Context, payload []byte, out chan<- ai.
 			s.emit(ctx, out, ai.StreamChunk{ThinkingDelta: ev.Delta.Thinking})
 		case "signature_delta":
 			s.signature[idx] += ev.Delta.Signature
+			s.emit(ctx, out, ai.StreamChunk{ThinkingSignature: ev.Delta.Signature})
 		case "input_json_delta":
 			idxCopy := idx
 			s.emit(ctx, out, ai.StreamChunk{ToolCallDelta: &ai.ToolCall{

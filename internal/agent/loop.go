@@ -10,7 +10,6 @@ import (
 	"gp/internal/ai"
 	"gp/internal/core/compaction"
 	"gp/internal/core/task"
-	"gp/internal/tools"
 )
 
 // RunLoop 实现经典的 ReAct 状态循环：
@@ -71,6 +70,10 @@ func RunLoopResume(ctx context.Context, a *AgentInstance) (string, error) {
 
 func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (string, error) {
 	taskTree := a.GetTaskTree()
+	if strings.HasPrefix(a.id, "sub_") {
+		// 子 Agent 生命周期已由父级 subagent ReplayInterrupt 任务兜底，跳过热路径 SQLite 写锁竞争
+		taskTree = nil
+	}
 
 	var toolDefs []json.RawMessage
 	toolReg := a.toolReg
@@ -161,6 +164,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 		var textDelta strings.Builder
 		var thinkingDelta strings.Builder
+		var thinkingSigDelta strings.Builder
 
 		type accToolCall struct {
 			index    int
@@ -171,7 +175,9 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		}
 
 		toolCallsMap := make(map[int]*accToolCall)
+		idToIdx := make(map[string]int)
 		var toolOrder []int
+		nextSeqIdx := 0
 		streamHandler := a.GetStreamHandler()
 		var streamErr error
 		var sawUsage bool
@@ -188,12 +194,38 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 			if chunk.ThinkingDelta != "" {
 				thinkingDelta.WriteString(chunk.ThinkingDelta)
 			}
+			if chunk.ThinkingSignature != "" {
+				thinkingSigDelta.WriteString(chunk.ThinkingSignature)
+			}
 
 			if chunk.ToolCallDelta != nil {
 				tc := chunk.ToolCallDelta
-				idx := 0
-				if tc.Index != nil {
+				var idx int
+				switch {
+				case tc.Index != nil:
 					idx = *tc.Index
+					if idx >= nextSeqIdx {
+						nextSeqIdx = idx + 1
+					}
+					if tc.ID != "" {
+						idToIdx[tc.ID] = idx
+					}
+				case tc.ID != "":
+					if existing, ok := idToIdx[tc.ID]; ok {
+						idx = existing
+					} else {
+						idx = nextSeqIdx
+						nextSeqIdx++
+						idToIdx[tc.ID] = idx
+					}
+				case tc.Function.Name != "" && len(toolOrder) > 0 && toolCallsMap[toolOrder[len(toolOrder)-1]].name != "" && toolCallsMap[toolOrder[len(toolOrder)-1]].name != tc.Function.Name:
+					idx = nextSeqIdx
+					nextSeqIdx++
+				case len(toolOrder) > 0:
+					idx = toolOrder[len(toolOrder)-1]
+				default:
+					idx = nextSeqIdx
+					nextSeqIdx++
 				}
 				acc, exists := toolCallsMap[idx]
 				if !exists {
@@ -287,10 +319,11 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		// 纯文本输出收敛退出
 		if len(finalToolCalls) == 0 {
 			a.sessionTree.AppendMessage(ai.Message{
-				Role:      ai.RoleAssistant,
-				Content:   textDelta.String(),
-				Thinking:  thinkingDelta.String(),
-				Timestamp: time.Now(),
+				Role:              ai.RoleAssistant,
+				Content:           textDelta.String(),
+				Thinking:          thinkingDelta.String(),
+				ThinkingSignature: thinkingSigDelta.String(),
+				Timestamp:         time.Now(),
 			})
 			a.SetStatus(StatusSettled)
 			if taskTree != nil {
@@ -302,108 +335,27 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 		// 包含工具调用请求：先记录助手回复，再执行各工具调用
 		a.sessionTree.AppendMessage(ai.Message{
-			Role:      ai.RoleAssistant,
-			Content:   textDelta.String(),
-			Thinking:  thinkingDelta.String(),
-			ToolCalls: finalToolCalls,
-			Timestamp: time.Now(),
+			Role:              ai.RoleAssistant,
+			Content:           textDelta.String(),
+			Thinking:          thinkingDelta.String(),
+			ThinkingSignature: thinkingSigDelta.String(),
+			ToolCalls:         finalToolCalls,
+			Timestamp:         time.Now(),
 		})
 
 		a.SetStatus(StatusToolExecuting)
 
-		for _, call := range finalToolCalls {
-			if err := ctx.Err(); err != nil {
-				a.SetStatus(StatusSettled)
-				if taskTree != nil {
-					abortCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					_ = taskTree.Abort(abortCtx, sessTaskID)
-					cancel()
-				}
-				return "", err
-			}
-
-			replayMode := tools.ReplayInterrupt
-			var targetTool tools.Tool
-			if a.toolReg != nil {
-				if t, ok := a.toolReg.Get(call.Function.Name); ok {
-					targetTool = t
-					replayMode = tools.GetReplayMode(t)
-				}
-			}
-
-			toolTaskID := fmt.Sprintf("task_tool_%s", call.ID)
-			toolCpData, _ := json.Marshal(task.ToolCheckpoint{
-				CallID:     call.ID,
-				ToolName:   call.Function.Name,
-				Arguments:  call.Function.Arguments,
-				ReplayMode: replayMode,
-				Turn:       turn,
-			})
-
-			// 【关键不变式】：执行工具前先原子落盘 Checkpoint (status = running)
-			if taskTree != nil {
-				_ = taskTree.RegisterTask(ctx, &task.Task{
-					ID:             toolTaskID,
-					SessionID:      a.SessionID(),
-					ParentID:       genTaskID,
-					Type:           task.TaskTypeTool,
-					Status:         task.TaskStatusRunning,
-					ReplayMode:     replayMode,
-					CheckpointData: toolCpData,
-				}, nil)
-			}
-
-			var resultContent string
-			var hasExecErr bool
-			toolStart := time.Now()
-			a.EmitEvent(AgentEvent{
-				Type:     EventToolCallStart,
-				Turn:     turn,
-				CallID:   call.ID,
-				ToolName: call.Function.Name,
-				Args:     call.Function.Arguments,
-			})
-			if targetTool == nil {
-				resultContent = fmt.Sprintf("Error: tool %q not found", call.Function.Name)
-				hasExecErr = true
-			} else {
-				toolCtx := &tools.ToolContext{
-					Context: ctx,
-					AgentID: a.id,
-					Cwd:     a.GetCwd(),
-				}
-				res, execErr := targetTool.Execute(toolCtx, call.Function.Arguments)
-				if execErr != nil {
-					resultContent = fmt.Sprintf("Tool %s execution error: %v", call.Function.Name, execErr)
-					hasExecErr = true
-				} else if res != nil {
-					resultContent = res.Content
-				}
-			}
-			a.EmitEvent(AgentEvent{
-				Type:     EventToolCallEnd,
-				Turn:     turn,
-				CallID:   call.ID,
-				ToolName: call.Function.Name,
-				Args:     call.Function.Arguments,
-				Result:   resultContent,
-				IsError:  hasExecErr,
-				Duration: time.Since(toolStart),
-			})
-
-			// 【工具执行完成】：更新状态为 completed / failed
-			if taskTree != nil {
-				finalStatus := task.TaskStatusCompleted
-				if hasExecErr {
-					finalStatus = task.TaskStatusFailed
-				}
-				_ = taskTree.UpdateTask(ctx, toolTaskID, finalStatus, nil)
-			}
-
+		outcomes, execBatchErr := executeToolBatch(ctx, a, turn, genTaskID, sessTaskID, taskTree, finalToolCalls)
+		if execBatchErr != nil {
+			a.SetStatus(StatusSettled)
+			return "", execBatchErr
+		}
+		for _, out := range outcomes {
 			a.sessionTree.AppendMessage(ai.Message{
 				Role:       ai.RoleTool,
-				ToolCallID: call.ID,
-				Content:    resultContent,
+				ToolCallID: out.callID,
+				Content:    out.content,
+				Images:     out.images,
 				Timestamp:  time.Now(),
 			})
 		}

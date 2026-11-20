@@ -156,9 +156,13 @@ func (p *Provider) buildBody(authInfo *exchangedAuth, req *ai.ChatRequest, model
 	var lastPrompt string
 
 	for _, m := range req.Messages {
+		var content any = m.Content
+		if m.Role == ai.RoleUser && len(m.Images) > 0 {
+			content = buildQoderImageContent(m.Content, m.Images)
+		}
 		entry := map[string]any{
 			"role":    string(m.Role),
-			"content": m.Content,
+			"content": content,
 		}
 		if m.Thinking != "" {
 			entry["reasoning_content"] = m.Thinking
@@ -181,6 +185,12 @@ func (p *Provider) buildBody(authInfo *exchangedAuth, req *ai.ChatRequest, model
 			entry["tool_call_id"] = m.ToolCallID
 		}
 		msgs = append(msgs, entry)
+		if m.Role == ai.RoleTool && len(m.Images) > 0 {
+			msgs = append(msgs, map[string]any{
+				"role":    "user",
+				"content": buildQoderImageContent("Attached image(s) from tool output:", m.Images),
+			})
+		}
 		if m.Role == ai.RoleUser && m.Content != "" {
 			lastPrompt = m.Content
 		}
@@ -415,4 +425,23 @@ func parseStatusCode(v any) int {
 	default:
 		return 0
 	}
+}
+
+func buildQoderImageContent(text string, images []ai.ImagePart) []map[string]any {
+	parts := make([]map[string]any, 0, len(images)+1)
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": text,
+		})
+	}
+	for _, img := range images {
+		parts = append(parts, map[string]any{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url": "data:" + img.MimeType + ";base64," + img.Base64Data,
+			},
+		})
+	}
+	return parts
 }

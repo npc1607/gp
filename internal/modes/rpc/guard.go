@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gp/internal/agent"
@@ -16,17 +19,71 @@ import (
 type riskVerdict struct {
 	RiskLevel          string `json:"risk_level"` // "high" | "medium" | "low"
 	Allow              bool   `json:"allow"`
+	CanApprove         bool   `json:"can_approve"`
 	Reason             string `json:"reason"`
 	RequiredPermission string `json:"required_permission"`
 }
 
+type cachedVerdict struct {
+	verdict   riskVerdict
+	expiresAt time.Time
+}
+
+// auditCache caches security audit verdicts across turns to avoid redundant subagent calls.
+type auditCache struct {
+	mu    sync.Mutex
+	items map[string]cachedVerdict
+	ttl   time.Duration
+}
+
+func newAuditCache(ttl time.Duration) *auditCache {
+	return &auditCache{
+		items: make(map[string]cachedVerdict),
+		ttl:   ttl,
+	}
+}
+
+func (c *auditCache) get(key string) (*riskVerdict, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	item, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(item.expiresAt) {
+		delete(c.items, key)
+		return nil, false
+	}
+	v := item.verdict
+	return &v, true
+}
+
+func (c *auditCache) set(key string, v *riskVerdict) {
+	if c == nil || v == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items[key] = cachedVerdict{
+		verdict:   *v,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+}
+
 // riskGuard evaluates potentially dangerous tool invocations using a dedicated security subagent.
 type riskGuard struct {
-	prov       ai.Provider
-	modelName  string
-	userPrompt string
-	reqID      string
-	emit       func(Event)
+	prov            ai.Provider
+	modelName       string
+	userPrompt      string
+	workDir         string
+	reqID           string
+	emit            func(Event)
+	cache           *auditCache
+	allowApproval   bool
+	requestApproval func(ctx context.Context, toolName, reason string, rawArgs json.RawMessage) (bool, error)
 }
 
 func wrapRegistryWithRiskGuard(reg *tools.Registry, guard *riskGuard) *tools.Registry {
@@ -47,9 +104,9 @@ func wrapRegistryWithRiskGuard(reg *tools.Registry, guard *riskGuard) *tools.Reg
 func isSensitiveTool(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	switch lower {
-	case "read", "grep", "find", "ls", "subagent", "ask_peer_agent":
+	case "subagent", "ask_peer_agent", "feishu_send_message", "mcp__feishu__feishu_send_message":
 		return false
-	case "bash", "write", "edit", "codemode":
+	case "bash", "write", "edit", "read", "grep", "find", "ls", "codemode":
 		return true
 	}
 	// Any read-only discovery/read MCP tool passes; all mutating/remote/exec tools go through audit.
@@ -71,33 +128,157 @@ func (g *guardedTool) Description() string          { return g.inner.Description
 func (g *guardedTool) InputSchema() json.RawMessage { return g.inner.InputSchema() }
 
 func (g *guardedTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*tools.ToolResult, error) {
-	if g.guard.shouldSkipCheck(g.inner.Name(), rawArgs) {
+	workDir := g.guard.workDir
+	if workDir == "" && ctx != nil {
+		workDir = ctx.Cwd
+	}
+
+	if g.guard.shouldSkipCheck(g.inner.Name(), rawArgs, workDir) {
 		return g.inner.Execute(ctx, rawArgs)
 	}
 
-	verdict, err := g.guard.assess(ctx.Context, g.inner.Name(), rawArgs)
-	if err != nil {
-		// Fail-closed if assessment fails on a potentially destructive operation
-		return nil, fmt.Errorf("安全审计子 Agent 评估失败，基于安全原则拒绝执行 %s 操作 (%v)；需要更高级别权限或人工确认", g.inner.Name(), err)
+	var verdict *riskVerdict
+	var err error
+	if staticV, matched := staticRiskVerdict(g.inner.Name(), rawArgs, workDir); matched {
+		verdict = staticV
+	} else {
+		verdict, err = g.guard.assess(ctx.Context, g.inner.Name(), rawArgs, workDir)
+		if err != nil {
+			return nil, fmt.Errorf("安全审计子 Agent 评估失败，基于安全原则拒绝执行 %s 操作 (%v)；禁止执行高风险操作", g.inner.Name(), err)
+		}
 	}
 
 	if !verdict.Allow || strings.EqualFold(verdict.RiskLevel, "high") {
-		permHint := verdict.RequiredPermission
-		if permHint == "" {
-			permHint = "需要管理员权限或本地终端人工确认后方可执行"
+		if verdict.CanApprove && g.guard.allowApproval && g.guard.requestApproval != nil {
+			approved, apprErr := g.guard.requestApproval(ctx.Context, g.inner.Name(), verdict.Reason, rawArgs)
+			if apprErr == nil && approved {
+				return g.inner.Execute(ctx, rawArgs)
+			}
+			if apprErr != nil {
+				return nil, fmt.Errorf("SECURITY_BLOCKED（危险程度：%s）: %s。禁止执行高风险操作（%v）。",
+					verdict.RiskLevel, verdict.Reason, apprErr)
+			}
+			return nil, fmt.Errorf("SECURITY_BLOCKED（危险程度：%s）: %s。禁止执行高风险操作（管理员已拒绝），严禁尝试绕过。",
+				verdict.RiskLevel, verdict.Reason)
 		}
-		return nil, fmt.Errorf("SECURITY_BLOCKED（危险程度：%s）: %s。%s。请向用户明确反馈该操作未执行，并提醒需要更高级别的权限，严禁尝试绕过。",
-			verdict.RiskLevel, verdict.Reason, permHint)
+
+		return nil, fmt.Errorf("SECURITY_BLOCKED（危险程度：%s）: %s。禁止执行高风险操作，请向用户明确反馈该操作风险过高、未予执行，严禁尝试绕过。",
+			verdict.RiskLevel, verdict.Reason)
 	}
 
 	return g.inner.Execute(ctx, rawArgs)
 }
 
-// shouldSkipCheck fast-passes strictly read-only single bash commands to avoid unnecessary latency.
-func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage) bool {
-	if strings.ToLower(toolName) != "bash" {
+// isTempPath reports whether p points strictly inside a standard temporary directory.
+func isTempPath(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" {
 		return false
 	}
+	clean := filepath.Clean(p)
+	if strings.Contains(clean, "..") {
+		return false
+	}
+
+	prefixes := []string{"/tmp/", "/private/tmp/", "/var/folders/"}
+	if tmpDir := strings.TrimSpace(os.TempDir()); tmpDir != "" && tmpDir != "/" {
+		prefixes = append(prefixes, strings.TrimRight(filepath.Clean(tmpDir), "/")+"/")
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(clean, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveTargetPath expands ~ and resolves relative paths against workDir.
+func resolveTargetPath(raw, workDir string) string {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return ""
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if p == "~" {
+				p = home
+			} else {
+				p = filepath.Join(home, p[2:])
+			}
+		}
+	}
+	if !filepath.IsAbs(p) && workDir != "" {
+		p = filepath.Join(workDir, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	return abs
+}
+
+// isWithinWorkDir reports whether targetPath resolves inside workDir (or equals workDir).
+func isWithinWorkDir(targetPath, workDir string) bool {
+	if workDir == "" || targetPath == "" {
+		return true
+	}
+	absWork, err := filepath.Abs(workDir)
+	if err != nil {
+		absWork = filepath.Clean(workDir)
+	}
+	absTarget := resolveTargetPath(targetPath, absWork)
+	rel, err := filepath.Rel(absWork, absTarget)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func extractToolPath(rawArgs json.RawMessage) string {
+	var args struct {
+		Path      string `json:"path"`
+		FilePath  string `json:"file_path"`
+		Dir       string `json:"dir"`
+		Directory string `json:"directory"`
+	}
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return ""
+	}
+	for _, candidate := range []string{args.FilePath, args.Path, args.Dir, args.Directory} {
+		if strings.TrimSpace(candidate) != "" {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	return ""
+}
+
+// shouldSkipCheck fast-passes strictly read-only commands inside workDir and operations confined to temporary directories.
+func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage, workDir string) bool {
+	lower := strings.ToLower(strings.TrimSpace(toolName))
+
+	// Read-only discovery tools: fast-pass only if targeting workDir or temp directory.
+	if lower == "read" || lower == "grep" || lower == "find" || lower == "ls" {
+		target := extractToolPath(rawArgs)
+		if target == "" {
+			return true // defaults to workDir
+		}
+		absTarget := resolveTargetPath(target, workDir)
+		return isTempPath(absTarget) || isWithinWorkDir(absTarget, workDir)
+	}
+
+	// Write/edit operations targeting temporary directories pass directly.
+	if lower == "write" || lower == "edit" {
+		target := extractToolPath(rawArgs)
+		if target != "" && isTempPath(resolveTargetPath(target, workDir)) {
+			return true
+		}
+		return false
+	}
+
+	if lower != "bash" {
+		return false
+	}
+
 	var args struct {
 		Command string `json:"command"`
 	}
@@ -109,39 +290,203 @@ func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage) bo
 		return true
 	}
 
-	// Any chaining, redirection, subshell, or dangerous keyword must go through the security subagent.
-	for _, token := range []string{";", "&&", "||", "|", ">", ">>", "<", "$(", "`", "\n"} {
+	// Strip harmless stderr redirects before analyzing
+	cmd = strings.ReplaceAll(cmd, "2>&1", "")
+	cmd = strings.ReplaceAll(cmd, "2>/dev/null", "")
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return true
+	}
+
+	// Any chaining, file redirection, subshell, or newline goes through audit
+	for _, token := range []string{";", "&&", "||", ">", ">>", "<", "$(", "`", "\n"} {
 		if strings.Contains(cmd, token) {
 			return false
 		}
 	}
 
+	// Support safe read-only pipelines (e.g., git log | head -n 20)
+	segments := strings.Split(cmd, "|")
+	for i, seg := range segments {
+		if !isSafeSingleCommand(strings.TrimSpace(seg), i > 0, workDir) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
 	fields := strings.Fields(cmd)
 	if len(fields) == 0 {
 		return true
 	}
 	bin := fields[0]
-	switch bin {
-	case "ls", "pwd", "cat", "head", "tail", "rg", "grep", "wc", "which", "echo":
+
+	if isPipeSink {
+		switch bin {
+		case "head", "tail", "grep", "rg", "wc", "sort", "uniq", "cut", "tr":
+			return true
+		default:
+			return false
+		}
+	}
+
+	// Any path-like argument in a read-only command must stay inside workDir or temp dirs.
+	checkArgsWithinBoundary := func(args []string) bool {
+		for _, f := range args {
+			if strings.HasPrefix(f, "-") {
+				continue
+			}
+			if strings.HasPrefix(f, "/") || strings.HasPrefix(f, "~/") || f == "~" || strings.Contains(f, "..") {
+				abs := resolveTargetPath(f, workDir)
+				if !isTempPath(abs) && !isWithinWorkDir(abs, workDir) {
+					return false
+				}
+			}
+		}
 		return true
+	}
+
+	// Read-only inspection commands
+	switch bin {
+	case "ls", "pwd", "cat", "head", "tail", "rg", "grep", "find", "wc", "which", "echo", "stat", "file", "date", "uname", "du", "df", "sort", "uniq":
+		if bin == "find" {
+			for _, f := range fields[1:] {
+				if f == "-delete" || f == "-exec" || f == "-execdir" {
+					return false
+				}
+			}
+		}
+		return checkArgsWithinBoundary(fields[1:])
 	case "git":
 		if len(fields) >= 2 {
 			switch fields[1] {
-			case "status", "log", "diff", "show", "branch":
-				// git branch -D / -d is mutating
+			case "status", "log", "diff", "show", "branch", "rev-parse":
 				for _, f := range fields[2:] {
 					if f == "-D" || f == "-d" || f == "-m" || f == "-M" {
 						return false
 					}
 				}
-				return true
+				return checkArgsWithinBoundary(fields[2:])
 			}
 		}
+	case "go":
+		if len(fields) >= 2 {
+			switch fields[1] {
+			case "version", "env", "list", "doc", "test", "build", "vet":
+				return checkArgsWithinBoundary(fields[2:])
+			}
+		}
+	case "lark-cli":
+		if len(fields) >= 3 && fields[1] == "im" && fields[2] == "+messages-send" {
+			return true
+		}
 	}
+
+	// Single-command file operations confined strictly to temporary directories
+	if bin == "rm" || bin == "mkdir" || bin == "touch" || bin == "rmdir" {
+		hasPath := false
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "-") {
+				continue
+			}
+			hasPath = true
+			if !isTempPath(resolveTargetPath(f, workDir)) {
+				return false
+			}
+		}
+		return hasPath
+	}
+
 	return false
 }
 
-func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.RawMessage) (*riskVerdict, error) {
+// staticRiskVerdict provides 0ms static classification for out-of-workspace access and unmistakably dangerous commands.
+func staticRiskVerdict(toolName string, rawArgs json.RawMessage, workDir string) (*riskVerdict, bool) {
+	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
+
+	// Any read/grep/find/ls/write/edit targeting outside workDir (and not temp) requires admin approval.
+	if lowerTool == "read" || lowerTool == "grep" || lowerTool == "find" || lowerTool == "ls" || lowerTool == "write" || lowerTool == "edit" {
+		target := extractToolPath(rawArgs)
+		if target != "" {
+			absTarget := resolveTargetPath(target, workDir)
+			if !isTempPath(absTarget) && !isWithinWorkDir(absTarget, workDir) {
+				return &riskVerdict{
+					RiskLevel:  "high",
+					Allow:      false,
+					CanApprove: true,
+					Reason:     fmt.Sprintf("尝试访问或修改工作目录外的路径（%s），需要管理员确认", target),
+				}, true
+			}
+		}
+		return nil, false
+	}
+
+	if lowerTool != "bash" {
+		return nil, false
+	}
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return nil, false
+	}
+	cmd := strings.TrimSpace(args.Command)
+	lower := strings.ToLower(cmd)
+
+	// Strictly non-approvable destructive/system-level commands
+	for _, pat := range []string{"sudo ", "mkfs", "dd if=", "rm -rf /", "rm -rf ~", "git push --force", "git push -f", "git reset --hard"} {
+		if strings.Contains(lower, pat) {
+			return &riskVerdict{
+				RiskLevel:  "high",
+				Allow:      false,
+				CanApprove: false,
+				Reason:     fmt.Sprintf("包含高危不可逆指令（%s）", strings.TrimSpace(pat)),
+			}, true
+		}
+	}
+
+	// Simple non-temp rm triggers instant admin approval without waiting for LLM
+	fields := strings.Fields(cmd)
+	if len(fields) > 0 && fields[0] == "rm" {
+		return &riskVerdict{
+			RiskLevel:  "high",
+			Allow:      false,
+			CanApprove: true,
+			Reason:     "包含本地文件删除（rm）操作，需要管理员确认",
+		}, true
+	}
+
+	// Out-of-workspace path reference in bash triggers admin approval
+	for _, f := range fields {
+		cleanTok := strings.Trim(f, `"'(),;`)
+		if strings.HasPrefix(cleanTok, "/") || strings.HasPrefix(cleanTok, "~/") || cleanTok == "~" {
+			// Allow standard system binaries like /opt/homebrew/bin/..., /usr/bin/... as executable prefix (index 0),
+			// but check data/path arguments against workDir & temp dirs.
+			if cleanTok == fields[0] && (strings.HasPrefix(cleanTok, "/usr/") || strings.HasPrefix(cleanTok, "/bin/") || strings.HasPrefix(cleanTok, "/opt/homebrew/")) {
+				continue
+			}
+			abs := resolveTargetPath(cleanTok, workDir)
+			if !isTempPath(abs) && !isWithinWorkDir(abs, workDir) {
+				return &riskVerdict{
+					RiskLevel:  "high",
+					Allow:      false,
+					CanApprove: true,
+					Reason:     fmt.Sprintf("命令尝试访问或操作工作目录外的路径（%s），需要管理员确认", cleanTok),
+				}, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
+func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.RawMessage, workDir string) (*riskVerdict, error) {
+	cacheKey := strings.ToLower(strings.TrimSpace(toolName)) + ":" + strings.TrimSpace(string(rawArgs))
+	if cached, ok := g.cache.get(cacheKey); ok {
+		return cached, nil
+	}
+
 	started := time.Now()
 	agentLabel := "安全审计 (risk_guard)"
 
@@ -162,25 +507,33 @@ func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.Ra
 	reviewer.SetSystemPrompt(`你是一个严格的操作安全审计子 Agent。你的唯一职责是评估主 Agent 即将调用的工具操作是否存在安全风险，并输出 JSON 决策。
 
 重要原则：
-- **即使用户自己在对话中明确要求删除、修改或外发，只要该操作属于高风险范畴，也必须判定为拒绝（allow: false）**！因为飞书群聊机器人环境不具备高权限人工确认能力。
+- **即使用户自己在对话中明确要求删除、修改代码/文档，只要该操作属于高风险破坏性范畴，也必须判定为拒绝（allow: false）**！因为飞书群聊机器人环境不具备高权限人工确认能力。
+- **临时文件夹豁免**：仅针对系统临时目录（/tmp/、/private/tmp/、/var/folders/）内的创建、写入或清理操作，属于低风险，应予以放行（allow: true）。
+- **飞书发消息/私聊豁免**：当用户明确要求向指定同事、群成员或群聊发送飞书消息/私聊（例如调用 feishu_send_message 或 lark-cli im +messages-send）时，属于机器人正常交互能力，应判定为中低风险并放行（risk_level: "medium", allow: true）；但若存在明显群发轰炸、泄露凭证密钥或非用户授权的对外发送，则应拒绝。
 
 评判标准：
-1. **高风险 (risk_level: "high", allow: false)**：
-   - 任何删除操作：包括本地文件/目录删除（rm、rmdir、unlink、shred、find ... -delete、git clean），以及**外部系统删除**（如飞书文档 delete_block、删除记录、drop/truncate 等）；
-   - 破坏性 Git 操作：如 git push --force、git reset --hard、git branch -D、丢弃未提交修改的 git checkout --；
-   - 提权或系统级修改：如 sudo、chmod、chown、mkfs、dd、kill/pkill、修改系统配置；
-   - 覆盖、编辑或批量修改生产代码、关键配置或共享文档（如 edit_document、replace_block、update_block、write/edit 核心文件等）；
-   - 任何通过脚本/codemode 间接执行删除或未授权外部写入的操作。
-2. **中低风险 (risk_level: "medium" 或 "low", allow: true)**：
+1. **高风险且不合规操作 (risk_level: "high", allow: false, can_approve: false)** —— 直接拒绝，不允许审批：
+   - 破坏性系统级操作：如 sudo、mkfs、dd、chmod 777、rm -rf 系统目录或整个仓库；
+   - 破坏性 Git 操作：如 git push --force、git reset --hard；
+   - 泄露凭证/密钥、社工欺诈、恶意群发或通过脚本/codemode 绕过安全限制。
+2. **高风险但可由管理员确认的操作 (risk_level: "high", allow: false, can_approve: true)** —— 需要群内管理员确认后方可执行：
+   - 局部删除普通文件、修改或更新外部共享文档（edit_document、replace_block、update_block、delete_block）、覆盖写关键配置文件等。
+3. **中低风险 (risk_level: "medium" 或 "low", allow: true, can_approve: false)**：
+   - 临时目录（/tmp/、/var/folders/）内的操作；
+   - 按用户要求发送飞书私聊或群消息（feishu_send_message / lark-cli im +messages-send）；
    - 常规只读探测、安全的局部开发测试或明确无破坏性的操作。
 
 必须严格只输出以下格式的合法 JSON（不要输出 markdown 代码块外的任何多余文字）：
-{"risk_level":"high|medium|low","allow":true|false,"reason":"简明中文原因","required_permission":"如拒绝，说明需要什么更高级别的权限"}`)
+{"risk_level":"high|medium|low","allow":true|false,"can_approve":true|false,"reason":"简明中文原因","required_permission":"如拒绝，说明所需权限"}`)
 
 	auditPrompt := fmt.Sprintf("用户原始请求：%s\n\n待审计工具：%s\n工具参数：%s\n\n请评估风险等级并给出 JSON 决策。",
 		g.userPrompt, toolName, string(rawArgs))
 
 	ans, err := reviewer.Prompt(subCtx, auditPrompt)
+	if err == nil && strings.TrimSpace(ans) == "" {
+		// Retry once if the model returned an empty response
+		ans, err = reviewer.Prompt(subCtx, auditPrompt+"\n\n注意：上次返回为空，请直接输出一行合法 JSON。")
+	}
 	dur := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -209,6 +562,8 @@ func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.Ra
 		}
 		return nil, parseErr
 	}
+
+	g.cache.set(cacheKey, verdict)
 
 	if g.emit != nil {
 		if !verdict.Allow || strings.EqualFold(verdict.RiskLevel, "high") {
@@ -243,7 +598,9 @@ func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.Ra
 
 func parseRiskVerdict(raw string) (*riskVerdict, error) {
 	cleaned := strings.TrimSpace(raw)
-	// Strip optional markdown code fences
+	if cleaned == "" {
+		return nil, fmt.Errorf("安全审计模型返回空内容")
+	}
 	if idx := strings.Index(cleaned, "{"); idx >= 0 {
 		if end := strings.LastIndex(cleaned, "}"); end > idx {
 			cleaned = cleaned[idx : end+1]
@@ -251,7 +608,7 @@ func parseRiskVerdict(raw string) (*riskVerdict, error) {
 	}
 	var v riskVerdict
 	if err := json.Unmarshal([]byte(cleaned), &v); err != nil {
-		return nil, fmt.Errorf("parse risk verdict JSON (%w): %s", err, raw)
+		return nil, fmt.Errorf("解析安全审计结果失败 (%w): %s", err, raw)
 	}
 	if v.RiskLevel == "" {
 		v.RiskLevel = "high"

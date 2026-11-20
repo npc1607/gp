@@ -110,7 +110,7 @@ type streamOptions struct {
 
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content"`
+	Content    any              `json:"content"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
@@ -133,6 +133,9 @@ func (p *Provider) buildRequestBody(req *ai.ChatRequest) ([]byte, error) {
 			Role:    string(msg.Role),
 			Content: msg.Content,
 		}
+		if msg.Role == ai.RoleUser && len(msg.Images) > 0 {
+			oMsg.Content = buildOpenAIImageContent(msg.Content, msg.Images)
+		}
 		if msg.Role == ai.RoleTool {
 			oMsg.ToolCallID = msg.ToolCallID
 		}
@@ -154,6 +157,13 @@ func (p *Provider) buildRequestBody(req *ai.ChatRequest) ([]byte, error) {
 			}
 		}
 		messages = append(messages, oMsg)
+		// OpenAI Chat Completions 的 role=tool 不支持直接附带 image_url，紧跟一条 user 多模态消息注入图片
+		if msg.Role == ai.RoleTool && len(msg.Images) > 0 {
+			messages = append(messages, openAIMessage{
+				Role:    "user",
+				Content: buildOpenAIImageContent("Attached image(s) from tool output:", msg.Images),
+			})
+		}
 	}
 
 	oReq := openAIChatRequest{
@@ -167,6 +177,25 @@ func (p *Provider) buildRequestBody(req *ai.ChatRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(oReq)
+}
+
+func buildOpenAIImageContent(text string, images []ai.ImagePart) []map[string]any {
+	parts := make([]map[string]any, 0, len(images)+1)
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": text,
+		})
+	}
+	for _, img := range images {
+		parts = append(parts, map[string]any{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url": "data:" + img.MimeType + ";base64," + img.Base64Data,
+			},
+		})
+	}
+	return parts
 }
 
 type openAIStreamChunk struct {
