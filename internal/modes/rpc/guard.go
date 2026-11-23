@@ -80,24 +80,23 @@ type riskGuard struct {
 	modelName       string
 	userPrompt      string
 	workDir         string
+	policy          ExecutionPolicy
+	caller          CallerContext
 	sessionID       string
-	senderID        string
-	isBoss          bool
 	reqID           string
 	emit            func(Event)
 	cache           *auditCache
 	approvedCache   *auditCache
-	allowApproval   bool
 	requestApproval func(ctx context.Context, toolName, reason string, rawArgs json.RawMessage) (bool, error)
 }
 
 func (g *riskGuard) scopePrefix() string {
-	who := strings.TrimSpace(g.senderID)
+	who := strings.TrimSpace(g.caller.SenderID)
 	if who == "" {
 		who = "anon"
 	}
 	role := "member"
-	if g.isBoss {
+	if g.caller.IsBoss {
 		role = "boss"
 	}
 	return fmt.Sprintf("%s:%s:%s:%s", who, role, strings.TrimSpace(g.workDir), strings.TrimSpace(g.sessionID))
@@ -121,7 +120,7 @@ func wrapRegistryWithRiskGuard(reg *tools.Registry, guard *riskGuard) *tools.Reg
 func isSensitiveTool(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	switch lower {
-	case "subagent", "ask_peer_agent", "feishu_send_message", "mcp__feishu__feishu_send_message":
+	case "subagent", "ask_peer_agent", "restore_observation", "ask_user_question", "feishu_send_message", "mcp__feishu__feishu_send_message":
 		return false
 	case "bash", "write", "edit", "read", "grep", "find", "ls", "codemode":
 		return true
@@ -156,7 +155,7 @@ func (g *guardedTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (
 
 	var verdict *riskVerdict
 	var err error
-	if staticV, matched := staticRiskVerdict(g.inner.Name(), rawArgs, workDir); matched {
+	if staticV, matched := g.guard.staticVerdict(g.inner.Name(), rawArgs, workDir); matched {
 		verdict = staticV
 	} else {
 		verdict, err = g.guard.assess(ctx.Context, g.inner.Name(), rawArgs, workDir)
@@ -166,7 +165,7 @@ func (g *guardedTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (
 	}
 
 	if !verdict.Allow || strings.EqualFold(verdict.RiskLevel, "high") {
-		if verdict.CanApprove && g.guard.allowApproval && g.guard.requestApproval != nil {
+		if verdict.CanApprove && g.guard.caller.AllowApproval && g.guard.requestApproval != nil {
 			apprKey := buildApprovalCacheKey(g.guard.scopePrefix(), g.inner.Name(), rawArgs, workDir)
 			if apprKey != "" && g.guard.approvedCache != nil {
 				if _, ok := g.guard.approvedCache.get(apprKey); ok {
@@ -260,6 +259,74 @@ func isWithinWorkDir(targetPath, workDir string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
+// evalPathOrClean resolves symlinks for existing paths (or nearest existing parent)
+// to prevent symlink escape attacks.
+func evalPathOrClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	dir := filepath.Dir(p)
+	base := filepath.Base(p)
+	if dir != p {
+		if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolvedDir, base)
+		}
+	}
+	return filepath.Clean(p)
+}
+
+func isWithinAllowedBoundary(targetPath, workDir string, allowedDirs []string) bool {
+	if len(allowedDirs) == 0 {
+		absTarget := resolveTargetPath(targetPath, workDir)
+		evalTarget := evalPathOrClean(absTarget)
+		return isWithinWorkDir(evalTarget, evalPathOrClean(resolveTargetPath(".", workDir)))
+	}
+	absTarget := resolveTargetPath(targetPath, workDir)
+	evalTarget := evalPathOrClean(absTarget)
+	for _, dir := range allowedDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		absAllowed := resolveTargetPath(dir, workDir)
+		evalAllowed := evalPathOrClean(absAllowed)
+		if isWithinWorkDir(evalTarget, evalAllowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesDeniedPath(targetPath, workDir string, deniedPaths []string) (string, bool) {
+	if len(deniedPaths) == 0 || strings.TrimSpace(targetPath) == "" {
+		return "", false
+	}
+	absTarget := resolveTargetPath(targetPath, workDir)
+	evalTarget := evalPathOrClean(absTarget)
+	base := filepath.Base(absTarget)
+
+	for _, pat := range deniedPaths {
+		p := strings.TrimSpace(pat)
+		if p == "" {
+			continue
+		}
+		// Glob or bare filename match (e.g. .env*, *.key, config.toml)
+		if !strings.Contains(p, "/") {
+			if ok, _ := filepath.Match(p, base); ok {
+				return pat, true
+			}
+		}
+		absPat := resolveTargetPath(p, workDir)
+		evalPat := evalPathOrClean(absPat)
+		if isWithinWorkDir(absTarget, absPat) || isWithinWorkDir(evalTarget, evalPat) {
+			return pat, true
+		}
+		if ok, _ := filepath.Match(absPat, absTarget); ok {
+			return pat, true
+		}
+	}
+	return "", false
+}
+
 func extractToolPath(rawArgs json.RawMessage) string {
 	var args struct {
 		Path      string `json:"path"`
@@ -282,27 +349,61 @@ func extractToolPath(rawArgs json.RawMessage) string {
 func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage, workDir string) bool {
 	lower := strings.ToLower(strings.TrimSpace(toolName))
 
-	// Read-only discovery tools: fast-pass only if targeting workDir or temp directory.
+	if g.effectiveBashMode() == "disabled" && lower == "bash" {
+		return false
+	}
+	if g.effectiveBashMode() == "scoped" && lower == "bash" {
+		return g.matchesScopedBash(rawArgs, workDir)
+	}
+	if g.policy.AllowWrite != nil && !*g.policy.AllowWrite && (lower == "write" || lower == "edit") {
+		return false
+	}
+
+	// Read-only discovery tools: fast-pass only if targeting allowed boundary or temp directory,
+	// and never matching denied_paths.
 	if lower == "read" || lower == "grep" || lower == "find" || lower == "ls" {
 		target := extractToolPath(rawArgs)
 		if target == "" {
-			return true // defaults to workDir
+			target = "."
 		}
 		absTarget := resolveTargetPath(target, workDir)
-		return isTempPath(absTarget) || isWithinWorkDir(absTarget, workDir)
+		if _, denied := matchesDeniedPath(absTarget, workDir, g.policy.DeniedPaths); denied {
+			return false
+		}
+		return isTempPath(absTarget) || isWithinAllowedBoundary(absTarget, workDir, g.policy.AllowedDirs)
 	}
 
-	// Write/edit operations targeting temporary directories pass directly.
+	// Write/edit operations targeting temporary directories pass directly (unless denied).
 	if lower == "write" || lower == "edit" {
 		target := extractToolPath(rawArgs)
-		if target != "" && isTempPath(resolveTargetPath(target, workDir)) {
-			return true
+		if target != "" {
+			absTarget := resolveTargetPath(target, workDir)
+			if _, denied := matchesDeniedPath(absTarget, workDir, g.policy.DeniedPaths); denied {
+				return false
+			}
+			if isTempPath(absTarget) {
+				return true
+			}
 		}
 		return false
 	}
 
 	if lower != "bash" {
 		return false
+	}
+	if len(g.policy.DeniedPaths) > 0 || len(g.policy.AllowedDirs) > 0 {
+		// When role-level path policies are active, inspect bash tokens against deniedPaths & allowedDirs too.
+		var bArgs struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(rawArgs, &bArgs); err == nil {
+			for _, tok := range splitCommandFields(bArgs.Command) {
+				cleanTok := strings.Trim(tok, `"'(),;`)
+				if _, denied := matchesDeniedPath(cleanTok, workDir, g.policy.DeniedPaths); denied {
+					return false
+				}
+			}
+		}
 	}
 
 	var args struct {
@@ -587,6 +688,209 @@ func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
 	}
 
 	return false
+}
+
+func (g *riskGuard) effectiveBashMode() string {
+	return effectiveBashMode(g.policy)
+}
+
+func (g *riskGuard) matchesScopedBash(rawArgs json.RawMessage, workDir string) bool {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return false
+	}
+	cmd := strings.TrimSpace(args.Command)
+	if cmd == "" {
+		return false
+	}
+	segments, ok := splitShellSegments(cmd)
+	if !ok || len(segments) != 1 {
+		return false
+	}
+	fields := splitCommandFields(segments[0].cmd)
+	if len(fields) == 0 {
+		return false
+	}
+
+	// Check deniedPaths on all tokens first
+	for _, tok := range fields {
+		cleanTok := strings.Trim(tok, `"'(),;`)
+		if _, denied := matchesDeniedPath(cleanTok, workDir, g.policy.DeniedPaths); denied {
+			return false
+		}
+	}
+
+	var matchedCap *CapabilityRule
+	for i := range g.policy.Capabilities {
+		capRule := &g.policy.Capabilities[i]
+		kind := strings.ToLower(strings.TrimSpace(capRule.Kind))
+		if kind != "skill" && kind != "cli" {
+			continue
+		}
+		if matchCapabilityCommand(segments[0].cmd, fields, workDir, capRule.Allow) {
+			matchedCap = capRule
+			break
+		}
+	}
+	if matchedCap == nil {
+		return false
+	}
+
+	// Verify all path-like arguments stay within /tmp, policy.AllowedDirs, or capability's Paths
+	for i, tok := range fields {
+		if i == 0 || strings.HasPrefix(tok, "-") {
+			continue
+		}
+		cleanTok := strings.Trim(tok, `"'(),;`)
+		if cleanTok == "" {
+			continue
+		}
+		looksLikePath := strings.HasPrefix(cleanTok, "/") ||
+			strings.HasPrefix(cleanTok, "~/") ||
+			cleanTok == "~" ||
+			strings.HasPrefix(cleanTok, "./") ||
+			strings.HasPrefix(cleanTok, "../") ||
+			cleanTok == ".." ||
+			cleanTok == "." ||
+			strings.Contains(cleanTok, "/")
+		if !looksLikePath {
+			continue
+		}
+		abs := resolveTargetPath(cleanTok, workDir)
+		if isTempPath(abs) {
+			continue
+		}
+		inAllowed := len(g.policy.AllowedDirs) > 0 && isWithinAllowedBoundary(abs, workDir, g.policy.AllowedDirs)
+		inCap := len(matchedCap.Paths) > 0 && isWithinAllowedBoundary(abs, workDir, matchedCap.Paths)
+		if !inAllowed && !inCap {
+			return false
+		}
+	}
+	return true
+}
+
+func matchCapabilityCommand(cmd string, fields []string, workDir string, allow []string) bool {
+	if len(fields) == 0 || len(allow) == 0 {
+		return false
+	}
+	bin := fields[0]
+	absBin := resolveTargetPath(bin, workDir)
+	for _, entry := range allow {
+		e := strings.TrimSpace(entry)
+		if e == "" {
+			continue
+		}
+		// Exact binary or multi-word command prefix (e.g., "mmdc" or "python3 scripts/render.py")
+		if cmd == e || strings.HasPrefix(cmd, e+" ") || bin == e {
+			return true
+		}
+		// Directory prefix (e.g., "~/.gp/skills/diagram/scripts/")
+		if strings.HasSuffix(e, "/") {
+			absDir := resolveTargetPath(strings.TrimRight(e, "/"), workDir)
+			if isWithinWorkDir(absBin, absDir) {
+				return true
+			}
+		} else if absBin == resolveTargetPath(e, workDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *riskGuard) staticVerdict(toolName string, rawArgs json.RawMessage, workDir string) (*riskVerdict, bool) {
+	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
+
+	if lowerTool == "bash" {
+		switch g.effectiveBashMode() {
+		case "disabled":
+			return &riskVerdict{
+				RiskLevel:  "high",
+				Allow:      false,
+				CanApprove: false,
+				Reason:     "当前角色已禁用 bash 终端执行权限",
+			}, true
+		case "scoped":
+			if g.matchesScopedBash(rawArgs, workDir) {
+				return &riskVerdict{
+					RiskLevel: "low",
+					Allow:     true,
+					Reason:    "命中已授权 Skill/CLI 能力白名单",
+				}, true
+			}
+			return &riskVerdict{
+				RiskLevel:  "high",
+				Allow:      false,
+				CanApprove: false,
+				Reason:     "当前角色处于受限 bash 模式（scoped），仅允许执行已授权 Skill/CLI 能力内的命令",
+			}, true
+		}
+	}
+	if g.policy.AllowWrite != nil && !*g.policy.AllowWrite && (lowerTool == "write" || lowerTool == "edit") {
+		return &riskVerdict{
+			RiskLevel:  "high",
+			Allow:      false,
+			CanApprove: false,
+			Reason:     "当前角色已禁用文件写入/修改权限",
+		}, true
+	}
+
+	// Any read/grep/find/ls/write/edit targeting denied_paths (permanent deny) or outside allowed boundary requires approval.
+	if lowerTool == "read" || lowerTool == "grep" || lowerTool == "find" || lowerTool == "ls" || lowerTool == "write" || lowerTool == "edit" {
+		target := extractToolPath(rawArgs)
+		effectiveTarget := target
+		if effectiveTarget == "" {
+			effectiveTarget = "."
+		}
+		absTarget := resolveTargetPath(effectiveTarget, workDir)
+		if pat, denied := matchesDeniedPath(absTarget, workDir, g.policy.DeniedPaths); denied {
+			return &riskVerdict{
+				RiskLevel:  "high",
+				Allow:      false,
+				CanApprove: false,
+				Reason:     fmt.Sprintf("命中敏感路径黑名单（%s），严禁访问", pat),
+			}, true
+		}
+		if !isTempPath(absTarget) && !isWithinAllowedBoundary(absTarget, workDir, g.policy.AllowedDirs) {
+			if target == "" && len(g.policy.AllowedDirs) > 0 {
+				return &riskVerdict{
+					RiskLevel:  "high",
+					Allow:      false,
+					CanApprove: false,
+					Reason:     fmt.Sprintf("当前角色仅允许访问指定目录（%s），请显式传入允许目录下的路径", strings.Join(g.policy.AllowedDirs, ", ")),
+				}, true
+			}
+			return &riskVerdict{
+				RiskLevel:  "high",
+				Allow:      false,
+				CanApprove: true,
+				Reason:     fmt.Sprintf("尝试访问或修改允许目录外的路径（%s），需要管理员确认", effectiveTarget),
+			}, true
+		}
+		return nil, false
+	}
+
+	if lowerTool == "bash" && len(g.policy.DeniedPaths) > 0 {
+		var bArgs struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(rawArgs, &bArgs); err == nil {
+			for _, tok := range splitCommandFields(bArgs.Command) {
+				cleanTok := strings.Trim(tok, `"'(),;`)
+				if pat, denied := matchesDeniedPath(cleanTok, workDir, g.policy.DeniedPaths); denied {
+					return &riskVerdict{
+						RiskLevel:  "high",
+						Allow:      false,
+						CanApprove: false,
+						Reason:     fmt.Sprintf("命令命中敏感路径黑名单（%s），严禁执行", pat),
+					}, true
+				}
+			}
+		}
+	}
+
+	return staticRiskVerdict(toolName, rawArgs, workDir)
 }
 
 // staticRiskVerdict provides 0ms static classification for out-of-workspace access and unmistakably dangerous commands.
@@ -901,11 +1205,11 @@ func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.Ra
 {"risk_level":"high|medium|low","allow":true|false,"can_approve":true|false,"reason":"简明中文原因","required_permission":"如拒绝，说明所需权限"}`)
 
 	whoDesc := "普通成员"
-	if g.isBoss {
+	if g.caller.IsBoss {
 		whoDesc = "管理员 (boss)"
 	}
-	if strings.TrimSpace(g.senderID) != "" {
-		whoDesc += " [" + strings.TrimSpace(g.senderID) + "]"
+	if strings.TrimSpace(g.caller.SenderID) != "" {
+		whoDesc += " [" + strings.TrimSpace(g.caller.SenderID) + "]"
 	}
 	auditPrompt := fmt.Sprintf("发起人：%s\n用户原始请求：%s\n\n待审计工具：%s\n工具参数：%s\n\n请评估风险等级并给出 JSON 决策。",
 		whoDesc, g.userPrompt, toolName, string(rawArgs))

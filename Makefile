@@ -3,13 +3,18 @@ VERSION := v0.1.0-alpha
 BUILD_DIR := bin
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
-.PHONY: all build test lint cross-compile clean
+LISTEN ?= unix:///tmp/gp-agent.sock
+
+.PHONY: all build serve test lint cross-compile clean
 
 all: lint test build
 
 build:
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(APP_NAME) ./cmd/gp
+
+serve:
+	go run ./cmd/gp serve --listen $(LISTEN)
 
 test:
 	go test -v -race -count=1 ./...

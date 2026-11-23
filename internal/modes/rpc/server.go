@@ -3,6 +3,7 @@ package rpc
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,16 +48,23 @@ type RunnerOptions struct {
 	AgentVersion  string
 }
 
+type questionReply struct {
+	answer  string
+	skipped bool
+}
+
 // Server serves AGP (Agent Gateway Protocol) requests over stdio or unix/tcp sockets.
 type Server struct {
-	opts        RunnerOptions
-	store       storage.Storage
-	ownStore    bool
-	mu          sync.Mutex
-	sessionGen  map[string]int
-	cancels     map[string]context.CancelFunc
-	approvals   map[string]chan bool
-	approvalSeq atomic.Uint64
+	opts          RunnerOptions
+	store         storage.Storage
+	ownStore      bool
+	mu            sync.Mutex
+	sessionGen    map[string]string
+	cancels       map[string]context.CancelFunc
+	approvals     map[string]chan bool
+	approvalSeq   atomic.Uint64
+	questions     map[string]chan questionReply
+	questionSeq   atomic.Uint64
 	auditCache    *auditCache
 	approvedCache *auditCache
 }
@@ -65,9 +73,10 @@ type Server struct {
 func NewServer(opts RunnerOptions) *Server {
 	return &Server{
 		opts:          opts,
-		sessionGen:    make(map[string]int),
+		sessionGen:    make(map[string]string),
 		cancels:       make(map[string]context.CancelFunc),
 		approvals:     make(map[string]chan bool),
+		questions:     make(map[string]chan questionReply),
 		auditCache:    newAuditCache(30 * time.Minute),
 		approvedCache: newAuditCache(5 * time.Minute),
 	}
@@ -238,10 +247,16 @@ func (s *Server) dispatch(ctx context.Context, emit func(Event), req Request, wg
 	case OpResetSession:
 		s.mu.Lock()
 		if req.SessionID != "" {
-			s.sessionGen[req.SessionID]++
+			s.sessionGen[req.SessionID] = fmt.Sprintf("%s_sess_%s", req.SessionID, newUUIDv4())
 		}
 		s.mu.Unlock()
 		emit(Event{ID: req.ID, Event: EventResetAck, SessionID: req.SessionID})
+	case OpListSessions:
+		s.handleListSessions(emit, req)
+	case OpResumeSession:
+		s.handleResumeSession(emit, req)
+	case OpDeleteSession:
+		s.handleDeleteSession(emit, req)
 	case OpAbort:
 		s.mu.Lock()
 		cancel, ok := s.cancels[req.TargetID]
@@ -252,6 +267,8 @@ func (s *Server) dispatch(ctx context.Context, emit func(Event), req Request, wg
 		emit(Event{ID: req.ID, Event: EventAbortAck})
 	case OpApprovalReply:
 		s.resolveApproval(req.ApprovalID, req.Approved)
+	case OpQuestionReply:
+		s.resolveQuestion(req.QuestionID, req.Answer, req.Skipped)
 	case OpRun:
 		wg.Add(1)
 		go func() {
@@ -268,17 +285,107 @@ func (s *Server) dispatch(ctx context.Context, emit func(Event), req Request, wg
 	}
 }
 
+func newUUIDv4() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func (s *Server) effectiveSessionID(sessionID string) string {
 	if sessionID == "" {
-		return fmt.Sprintf("rpc_%d", time.Now().UnixNano())
+		return fmt.Sprintf("sess_%s", newUUIDv4())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	gen := s.sessionGen[sessionID]
-	if gen == 0 {
-		return sessionID
+	if cur := s.sessionGen[sessionID]; cur != "" {
+		return cur
 	}
-	return fmt.Sprintf("%s_g%d", sessionID, gen)
+	return sessionID
+}
+
+func sessionBelongsToChat(chatSessionID, targetID string) bool {
+	if chatSessionID == "" {
+		return targetID != ""
+	}
+	return targetID == chatSessionID || strings.HasPrefix(targetID, chatSessionID+"_")
+}
+
+func (s *Server) handleListSessions(emit func(Event), req Request) {
+	store := s.ensureStore()
+	lister, ok := store.(storage.SessionLister)
+	if !ok {
+		emit(Event{ID: req.ID, Event: EventError, Code: "UNSUPPORTED", Message: "storage does not support listing sessions"})
+		return
+	}
+	all, err := lister.ListSessions(100)
+	if err != nil {
+		emit(Event{ID: req.ID, Event: EventError, Code: "STORAGE_ERROR", Message: err.Error()})
+		return
+	}
+	var out []SessionSummary
+	for _, item := range all {
+		if strings.Contains(item.SessionID, ":sub:") {
+			continue
+		}
+		if req.SessionID != "" && !sessionBelongsToChat(req.SessionID, item.SessionID) {
+			continue
+		}
+		out = append(out, SessionSummary{
+			SessionID:    item.SessionID,
+			MessageCount: item.MessageCount,
+			FirstPrompt:  item.FirstPrompt,
+			UpdatedAt:    item.UpdatedAt.Local().Format("2006-01-02 15:04:05"),
+		})
+		if len(out) >= 20 {
+			break
+		}
+	}
+	emit(Event{
+		ID:        req.ID,
+		Event:     EventSessionsList,
+		SessionID: s.effectiveSessionID(req.SessionID),
+		Sessions:  out,
+	})
+}
+
+func (s *Server) handleResumeSession(emit func(Event), req Request) {
+	targetID := strings.TrimSpace(req.TargetID)
+	if targetID == "" || !sessionBelongsToChat(req.SessionID, targetID) {
+		emit(Event{ID: req.ID, Event: EventError, Code: "INVALID_SESSION", Message: "目标会话不存在或不属于当前群聊"})
+		return
+	}
+	s.mu.Lock()
+	s.sessionGen[req.SessionID] = targetID
+	s.mu.Unlock()
+	emit(Event{ID: req.ID, Event: EventResumeAck, SessionID: targetID})
+}
+
+func (s *Server) handleDeleteSession(emit func(Event), req Request) {
+	targetID := strings.TrimSpace(req.TargetID)
+	if targetID == "" || !sessionBelongsToChat(req.SessionID, targetID) {
+		emit(Event{ID: req.ID, Event: EventError, Code: "INVALID_SESSION", Message: "目标会话不存在或不属于当前群聊"})
+		return
+	}
+	store := s.ensureStore()
+	deleter, ok := store.(storage.SessionDeleter)
+	if !ok {
+		emit(Event{ID: req.ID, Event: EventError, Code: "UNSUPPORTED", Message: "storage does not support deleting sessions"})
+		return
+	}
+	if err := deleter.DeleteSession(targetID); err != nil {
+		emit(Event{ID: req.ID, Event: EventError, Code: "STORAGE_ERROR", Message: err.Error()})
+		return
+	}
+	s.mu.Lock()
+	if cur := s.sessionGen[req.SessionID]; cur == targetID || (cur == "" && targetID == req.SessionID) {
+		s.sessionGen[req.SessionID] = fmt.Sprintf("%s_sess_%s", req.SessionID, newUUIDv4())
+	}
+	s.mu.Unlock()
+	emit(Event{ID: req.ID, Event: EventDeleteAck, SessionID: targetID})
 }
 
 func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
@@ -347,7 +454,9 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 	}
 
 	var allowlist []string
-	if req.Options != nil && len(req.Options.Tools) > 0 {
+	if req.Options != nil && req.Options.Policy != nil && len(req.Options.Policy.Tools) > 0 {
+		allowlist = req.Options.Policy.Tools
+	} else if req.Options != nil && len(req.Options.Tools) > 0 {
 		allowlist = req.Options.Tools
 	} else {
 		allowlist = s.opts.ToolAllowlist
@@ -359,29 +468,55 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		return
 	}
 
-	allowApproval := req.Options != nil && req.Options.AllowApproval
-	senderID := ""
-	isBoss := false
+	var policy ExecutionPolicy
+	var caller CallerContext
 	if req.Options != nil {
-		senderID = req.Options.SenderID
-		isBoss = req.Options.IsBoss
+		if req.Options.Policy != nil {
+			policy = *req.Options.Policy
+		}
+		if req.Options.Caller != nil {
+			caller = *req.Options.Caller
+		}
 	}
-	if senderID == "" && req.Metadata != nil {
-		senderID = req.Metadata["sender_id"]
+	if policy.WorkDir == "" {
+		policy.WorkDir = cwd
 	}
+	if len(policy.Tools) == 0 {
+		policy.Tools = allowlist
+	}
+	if caller.SenderID == "" && req.Metadata != nil {
+		caller.SenderID = req.Metadata["sender_id"]
+	}
+
+	reg = applyToolPolicy(reg, policy)
+	if allowlistIncludes(policy.Tools, "ask_user_question") {
+		replaced := tools.NewRegistry()
+		for _, t := range reg.List() {
+			if strings.EqualFold(t.Name(), "ask_user_question") {
+				continue
+			}
+			_ = replaced.Register(t)
+		}
+		_ = replaced.Register(&askUserQuestionTool{
+			ask: func(qCtx context.Context, question string, options []string) (string, bool, error) {
+				return s.requestQuestion(qCtx, req.ID, emit, question, options)
+			},
+		})
+		reg = replaced
+	}
+
 	reg = wrapRegistryWithRiskGuard(reg, &riskGuard{
 		prov:          prov,
 		modelName:     modelName,
 		userPrompt:    prompt,
 		workDir:       cwd,
+		policy:        policy,
+		caller:        caller,
 		sessionID:     req.SessionID,
-		senderID:      senderID,
-		isBoss:        isBoss,
 		reqID:         req.ID,
 		emit:          emit,
 		cache:         s.auditCache,
 		approvedCache: s.approvedCache,
-		allowApproval: allowApproval,
 		requestApproval: func(apCtx context.Context, toolName, reason string, rawArgs json.RawMessage) (bool, error) {
 			return s.requestApproval(apCtx, req.ID, emit, toolName, reason, rawArgs)
 		},
@@ -464,15 +599,26 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 	var usageMu sync.Mutex
 	var turnUsage ai.TokenUsage
 	ag.SetEventHandler(func(ev agent.AgentEvent) {
-		if ev.Type != agent.EventUsage || ev.Usage == nil {
-			return
+		switch ev.Type {
+		case agent.EventToolProgress:
+			emit(Event{
+				ID:      req.ID,
+				Event:   EventToolProgress,
+				Tool:    ev.ToolName,
+				Text:    ev.Result,
+				Stalled: ev.Stalled,
+			})
+		case agent.EventUsage:
+			if ev.Usage == nil {
+				return
+			}
+			usageMu.Lock()
+			turnUsage.InputTokens += ev.Usage.InputTokens
+			turnUsage.OutputTokens += ev.Usage.OutputTokens
+			turnUsage.CacheReadTokens += ev.Usage.CacheReadTokens
+			turnUsage.TotalTokens += ev.Usage.TotalTokens
+			usageMu.Unlock()
 		}
-		usageMu.Lock()
-		turnUsage.InputTokens += ev.Usage.InputTokens
-		turnUsage.OutputTokens += ev.Usage.OutputTokens
-		turnUsage.CacheReadTokens += ev.Usage.CacheReadTokens
-		turnUsage.TotalTokens += ev.Usage.TotalTokens
-		usageMu.Unlock()
 	})
 
 	ans, err := ag.Prompt(cancellableCtx, prompt)
@@ -538,17 +684,200 @@ func (s *Server) requestApproval(ctx context.Context, reqID string, emit func(Ev
 		Args:       argsMap,
 	})
 
-	timer := time.NewTimer(15 * time.Second)
+	timer := time.NewTimer(60 * time.Second)
 	defer timer.Stop()
 
 	select {
 	case approved := <-ch:
 		return approved, nil
 	case <-timer.C:
-		return false, fmt.Errorf("等待管理员确认超时（15s）")
+		return false, fmt.Errorf("等待管理员确认超时（60s）")
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
+}
+
+func (s *Server) resolveQuestion(questionID, answer string, skipped bool) {
+	s.mu.Lock()
+	ch, ok := s.questions[questionID]
+	s.mu.Unlock()
+	if ok && ch != nil {
+		select {
+		case ch <- questionReply{answer: answer, skipped: skipped}:
+		default:
+		}
+	}
+}
+
+func (s *Server) requestQuestion(ctx context.Context, reqID string, emit func(Event), question string, options []string) (string, bool, error) {
+	id := fmt.Sprintf("ask_%d", s.questionSeq.Add(1))
+	ch := make(chan questionReply, 1)
+
+	s.mu.Lock()
+	s.questions[id] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.questions, id)
+		s.mu.Unlock()
+	}()
+
+	emit(Event{
+		ID:         reqID,
+		Event:      EventQuestionRequest,
+		QuestionID: id,
+		Question:   question,
+		Options:    options,
+	})
+
+	timer := time.NewTimer(90 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case rep := <-ch:
+		return rep.answer, rep.skipped, nil
+	case <-timer.C:
+		return "", true, nil
+	case <-ctx.Done():
+		return "", true, ctx.Err()
+	}
+}
+
+func effectiveBashMode(policy ExecutionPolicy) string {
+	mode := strings.ToLower(strings.TrimSpace(policy.BashMode))
+	if mode != "" {
+		return mode
+	}
+	if policy.AllowBash != nil && !*policy.AllowBash {
+		return "disabled"
+	}
+	return "full"
+}
+
+func applyToolPolicy(reg *tools.Registry, policy ExecutionPolicy) *tools.Registry {
+	if reg == nil {
+		return nil
+	}
+	bashDisabled := effectiveBashMode(policy) == "disabled"
+	writeDisabled := policy.AllowWrite != nil && !*policy.AllowWrite
+
+	var mcpAllowed map[string]struct{}
+	hasMCPRule := false
+	for _, c := range policy.Capabilities {
+		if strings.EqualFold(strings.TrimSpace(c.Kind), "mcp") {
+			hasMCPRule = true
+			if mcpAllowed == nil {
+				mcpAllowed = make(map[string]struct{})
+			}
+			for _, a := range c.Allow {
+				if key := strings.ToLower(strings.TrimSpace(a)); key != "" {
+					mcpAllowed[key] = struct{}{}
+				}
+			}
+		}
+	}
+
+	if !bashDisabled && !writeDisabled && !hasMCPRule {
+		return reg
+	}
+	filtered := tools.NewRegistry()
+	for _, t := range reg.List() {
+		lower := strings.ToLower(t.Name())
+		if bashDisabled && lower == "bash" {
+			continue
+		}
+		if writeDisabled && (lower == "write" || lower == "edit") {
+			continue
+		}
+		if hasMCPRule && strings.HasPrefix(lower, "mcp__") {
+			if _, ok := mcpAllowed[lower]; !ok {
+				continue
+			}
+		}
+		_ = filtered.Register(t)
+	}
+	return filtered
+}
+
+func allowlistIncludes(allowlist []string, target string) bool {
+	if len(allowlist) == 0 {
+		return true
+	}
+	for _, item := range allowlist {
+		if strings.EqualFold(strings.TrimSpace(item), target) {
+			return true
+		}
+	}
+	return false
+}
+
+type askUserQuestionTool struct {
+	ask func(ctx context.Context, question string, options []string) (string, bool, error)
+}
+
+func (t *askUserQuestionTool) Name() string { return "ask_user_question" }
+
+func (t *askUserQuestionTool) Description() string {
+	return "向当前用户发起带可选按钮的交互式询问（用户也可直接发文字或跳过），用于在关键分支需要用户确认或选择时收集答案。"
+}
+
+func (t *askUserQuestionTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"question": {"type": "string", "description": "需要向用户确认或提问的清晰问题"},
+			"options": {"type": "array", "items": {"type": "string"}, "description": "可选的快捷选项列表（最多 5 个）"}
+		},
+		"required": ["question"]
+	}`)
+}
+
+func (t *askUserQuestionTool) ReplayMode() tools.ReplayMode { return tools.ReplaySafe }
+
+func (t *askUserQuestionTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*tools.ToolResult, error) {
+	var args struct {
+		Question  string   `json:"question"`
+		Options   []string `json:"options"`
+		Questions []struct {
+			Question string `json:"question"`
+			Options  []struct {
+				Label string `json:"label"`
+			} `json:"options"`
+		} `json:"questions"`
+	}
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return &tools.ToolResult{Content: fmt.Sprintf("参数解析失败: %v", err), IsError: true}, nil
+	}
+	q := strings.TrimSpace(args.Question)
+	opts := args.Options
+	if q == "" && len(args.Questions) > 0 {
+		q = strings.TrimSpace(args.Questions[0].Question)
+		for _, o := range args.Questions[0].Options {
+			if lbl := strings.TrimSpace(o.Label); lbl != "" {
+				opts = append(opts, lbl)
+			}
+		}
+	}
+	if q == "" {
+		return &tools.ToolResult{Content: "缺少必填参数 question", IsError: true}, nil
+	}
+
+	parentCtx := context.Background()
+	if ctx != nil && ctx.Context != nil {
+		parentCtx = ctx.Context
+	}
+	ans, skipped, err := t.ask(parentCtx, q, opts)
+	if err != nil {
+		return nil, err
+	}
+	if skipped || strings.TrimSpace(ans) == "" {
+		return &tools.ToolResult{
+			Content: "用户选择跳过或 90s 未回复，请按最合理的默认方案继续执行或向用户说明。",
+		}, nil
+	}
+	return &tools.ToolResult{
+		Content: fmt.Sprintf("用户回复：%s", strings.TrimSpace(ans)),
+	}, nil
 }
 
 func (s *Server) resolveRegistry(cwd, homeDir string, cfg *settings.Settings, allowlist []string) (*tools.Registry, error) {

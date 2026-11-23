@@ -142,10 +142,10 @@ func TestRiskGuardWorkspaceBoundary(t *testing.T) {
 
 	var approvalCalls int
 	guarded := wrapRegistryWithRiskGuard(reg, &riskGuard{
-		prov:          &verdictProvider{verdictJSON: `{"risk_level":"low","allow":true,"can_approve":false,"reason":"ok"}`},
-		modelName:     "mock/reviewer",
-		workDir:       workDir,
-		allowApproval: true,
+		prov:      &verdictProvider{verdictJSON: `{"risk_level":"low","allow":true,"can_approve":false,"reason":"ok"}`},
+		modelName: "mock/reviewer",
+		workDir:   workDir,
+		caller:    CallerContext{AllowApproval: true},
 		requestApproval: func(_ context.Context, _ string, _ string, _ json.RawMessage) (bool, error) {
 			approvalCalls++
 			return false, nil
@@ -280,10 +280,10 @@ func TestRiskGuardOutOfWorkspaceNeverHitsCache(t *testing.T) {
 	var approvalCalls int
 	vp := &verdictProvider{verdictJSON: `{"risk_level":"low","allow":true,"reason":"ok","required_permission":""}`}
 	guarded := wrapRegistryWithRiskGuard(reg, &riskGuard{
-		prov:          vp,
-		modelName:     "mock/reviewer",
-		workDir:       workDir,
-		allowApproval: true,
+		prov:      vp,
+		modelName: "mock/reviewer",
+		workDir:   workDir,
+		caller:    CallerContext{AllowApproval: true},
 		requestApproval: func(_ context.Context, _ string, _ string, _ json.RawMessage) (bool, error) {
 			approvalCalls++
 			return false, nil
@@ -341,11 +341,9 @@ func TestRiskGuardWhoResourceAndApprovalCache(t *testing.T) {
 		modelName:     "mock/reviewer",
 		workDir:       workDir,
 		sessionID:     "chat-1",
-		senderID:      "ou_boss",
-		isBoss:        true,
+		caller:        CallerContext{SenderID: "ou_boss", IsBoss: true, AllowApproval: true},
 		cache:         sharedAudit,
 		approvedCache: sharedApproved,
-		allowApproval: true,
 		requestApproval: func(_ context.Context, _ string, _ string, _ json.RawMessage) (bool, error) {
 			apprA++
 			return true, nil
@@ -360,11 +358,9 @@ func TestRiskGuardWhoResourceAndApprovalCache(t *testing.T) {
 		modelName:     "mock/reviewer",
 		workDir:       workDir,
 		sessionID:     "chat-1",
-		senderID:      "ou_member",
-		isBoss:        false,
+		caller:        CallerContext{SenderID: "ou_member", IsBoss: false, AllowApproval: true},
 		cache:         sharedAudit,
 		approvedCache: sharedApproved,
-		allowApproval: true,
 		requestApproval: func(_ context.Context, _ string, _ string, _ json.RawMessage) (bool, error) {
 			apprB++
 			return false, nil
@@ -425,5 +421,153 @@ func TestRiskGuardWhoResourceAndApprovalCache(t *testing.T) {
 	}
 	if apprB != 1 {
 		t.Fatalf("expected 1 approval prompt for ou_member, got %d", apprB)
+	}
+}
+
+func TestRiskGuardRolePolicyEnforcement(t *testing.T) {
+	baseDir := "/workspace/services"
+	dataSvc := baseDir + "/data-service"
+	collectDao := baseDir + "/collect-dao"
+	otherRepo := baseDir + "/fsrobot"
+
+	readStub := &stubTool{name: "read"}
+	writeStub := &stubTool{name: "write"}
+	bashStub := &stubTool{name: "bash"}
+	reg := tools.NewRegistry()
+	_ = reg.Register(readStub)
+	_ = reg.Register(writeStub)
+	_ = reg.Register(bashStub)
+
+	falseVal := false
+	guarded := wrapRegistryWithRiskGuard(reg, &riskGuard{
+		prov:      &verdictProvider{verdictJSON: `{"risk_level":"low","allow":true,"reason":"ok"}`},
+		modelName: "mock/reviewer",
+		workDir:   baseDir,
+		policy: ExecutionPolicy{
+			WorkDir:     baseDir,
+			AllowedDirs: []string{dataSvc, collectDao},
+			DeniedPaths: []string{".env*", "*.key", "config.toml"},
+			AllowBash:   &falseVal,
+			AllowWrite:  &falseVal,
+		},
+		cache: newAuditCache(5 * time.Minute),
+	})
+
+	rt, _ := guarded.Get("read")
+	wt, _ := guarded.Get("write")
+	bt, _ := guarded.Get("bash")
+	ctx := &tools.ToolContext{Context: context.Background(), Cwd: baseDir}
+
+	// 1. Allowed dirs (data-service & collect-dao) pass at 0ms
+	if _, err := rt.Execute(ctx, json.RawMessage(`{"path":"data-service/main.go"}`)); err != nil || !readStub.executed {
+		t.Fatalf("expected read in data-service to pass, err=%v", err)
+	}
+	readStub.executed = false
+	if _, err := rt.Execute(ctx, json.RawMessage(`{"path":"collect-dao/repo.go"}`)); err != nil || !readStub.executed {
+		t.Fatalf("expected read in collect-dao to pass, err=%v", err)
+	}
+
+	// 2. Sibling repo outside allowed_dirs (fsrobot) must be blocked
+	readStub.executed = false
+	if _, err := rt.Execute(ctx, json.RawMessage(`{"path":"fsrobot/main.go"}`)); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected read in sibling %s to be blocked, got: %v", otherRepo, err)
+	}
+
+	// 3. Denied path (.env.prod, secret.key) inside allowed_dirs must be permanently blocked
+	if _, err := rt.Execute(ctx, json.RawMessage(`{"path":"data-service/.env.prod"}`)); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected denied_paths .env.prod to be blocked, got: %v", err)
+	}
+	if _, err := rt.Execute(ctx, json.RawMessage(`{"path":"collect-dao/tls.key"}`)); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected denied_paths tls.key to be blocked, got: %v", err)
+	}
+
+	// 4. allow_bash=false & allow_write=false permanently block bash/write
+	if _, err := bt.Execute(ctx, json.RawMessage(`{"command":"ls"}`)); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected allow_bash=false to block bash, got: %v", err)
+	}
+	if _, err := wt.Execute(ctx, json.RawMessage(`{"path":"data-service/a.go","content":"x"}`)); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected allow_write=false to block write, got: %v", err)
+	}
+}
+
+func TestRiskGuardScopedBashAndCapabilities(t *testing.T) {
+	workDir := "/workspace/services"
+	skillDir := "/opt/skills/diagram"
+	bashStub := &stubTool{name: "bash"}
+	mcpRead := &stubTool{name: "mcp__feishu__read_doc"}
+	mcpDel := &stubTool{name: "mcp__feishu__delete_doc"}
+
+	rawReg := tools.NewRegistry()
+	_ = rawReg.Register(bashStub)
+	_ = rawReg.Register(mcpRead)
+	_ = rawReg.Register(mcpDel)
+
+	policy := ExecutionPolicy{
+		WorkDir:     workDir,
+		AllowedDirs: []string{workDir + "/data-service"},
+		DeniedPaths: []string{".env*"},
+		BashMode:    "scoped",
+		Capabilities: []CapabilityRule{
+			{
+				Kind:  "skill",
+				Name:  "diagram-skill",
+				Allow: []string{"mmdc", "scripts/draw.sh"},
+				Paths: []string{skillDir},
+			},
+			{
+				Kind:  "mcp",
+				Name:  "feishu-mcp",
+				Allow: []string{"mcp__feishu__read_doc"},
+			},
+		},
+	}
+
+	// 1. applyToolPolicy keeps allowed MCP tool and strips non-allowlisted MCP tool
+	scopedReg := applyToolPolicy(rawReg, policy)
+	if _, ok := scopedReg.Get("mcp__feishu__read_doc"); !ok {
+		t.Fatal("expected allowlisted mcp__feishu__read_doc to remain")
+	}
+	if _, ok := scopedReg.Get("mcp__feishu__delete_doc"); ok {
+		t.Fatal("expected non-allowlisted mcp__feishu__delete_doc to be stripped")
+	}
+
+	guarded := wrapRegistryWithRiskGuard(scopedReg, &riskGuard{
+		prov:      &verdictProvider{verdictJSON: `{"risk_level":"low","allow":true,"reason":"ok"}`},
+		modelName: "mock/reviewer",
+		workDir:   workDir,
+		policy:    policy,
+		cache:     newAuditCache(5 * time.Minute),
+	})
+	bt, _ := guarded.Get("bash")
+	ctx := &tools.ToolContext{Context: context.Background(), Cwd: workDir}
+
+	// 2. Authorized skill commands within /tmp & skillDir pass at 0ms
+	for _, cmd := range []string{
+		`mmdc -i /opt/skills/diagram/tpl.mmd -o /tmp/out.png`,
+		`scripts/draw.sh /tmp/diagram.svg`,
+	} {
+		bashStub.executed = false
+		raw, _ := json.Marshal(map[string]string{"command": cmd})
+		if _, err := bt.Execute(ctx, raw); err != nil || !bashStub.executed {
+			t.Fatalf("expected scoped skill command %q to pass, err=%v executed=%v", cmd, err, bashStub.executed)
+		}
+	}
+
+	// 3. Disallowed bash commands, chaining, and out-of-scope paths are permanently blocked
+	for _, badCmd := range []string{
+		`ls -la`,
+		`cat /etc/passwd`,
+		`mmdc -i /opt/skills/diagram/tpl.mmd && rm -rf /tmp/x`,
+		`mmdc -i /etc/hosts -o /tmp/out.png`,
+		`python3 -c "print(1)"`,
+	} {
+		bashStub.executed = false
+		raw, _ := json.Marshal(map[string]string{"command": badCmd})
+		if _, err := bt.Execute(ctx, raw); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+			t.Fatalf("expected %q to be blocked in scoped bash mode, got: %v", badCmd, err)
+		}
+		if bashStub.executed {
+			t.Fatalf("blocked command %q should NOT have executed", badCmd)
+		}
 	}
 }
