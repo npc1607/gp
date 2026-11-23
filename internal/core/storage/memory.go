@@ -300,3 +300,49 @@ func cloneCheckpoint(cp *TaskCheckpoint) *TaskCheckpoint {
 		UpdatedAt:      cp.UpdatedAt,
 	}
 }
+
+func (m *MemoryStorage) ListSessions(limit int) ([]SessionSummary, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return nil, fmt.Errorf("storage closed")
+	}
+
+	var out []SessionSummary
+	for sid, list := range m.entries {
+		if len(list) == 0 {
+			continue
+		}
+		out = append(out, SessionSummary{
+			SessionID:    sid,
+			MessageCount: len(list),
+			UpdatedAt:    list[len(list)-1].CreatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *MemoryStorage) DeleteSession(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return fmt.Errorf("storage closed")
+	}
+	for _, e := range m.entries[sessionID] {
+		delete(m.entryByID, e.ID)
+	}
+	delete(m.entries, sessionID)
+	delete(m.documents, sessionID)
+	for tid, cp := range m.checkpoints {
+		if cp.SessionID == sessionID {
+			delete(m.checkpoints, tid)
+		}
+	}
+	return nil
+}

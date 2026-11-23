@@ -47,6 +47,11 @@ type SessionLister interface {
 	ListSessions(limit int) ([]SessionSummary, error)
 }
 
+// SessionDeleter 可选历史会话删除接口
+type SessionDeleter interface {
+	DeleteSession(sessionID string) error
+}
+
 // Storage 存储抽象接口
 type Storage interface {
 	Commit(ctx context.Context, fn func(tx Transaction) error) error

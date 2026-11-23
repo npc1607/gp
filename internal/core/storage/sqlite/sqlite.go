@@ -455,3 +455,26 @@ func (tx *sqliteTx) GetCheckpoint(taskID string) (*storage.TaskCheckpoint, error
 	}
 	return &cp, nil
 }
+
+// DeleteSession 删除指定会话的所有条目、文档与任务检查点
+func (s *SqliteStorage) DeleteSession(sessionID string) error {
+	if s.isClosed() {
+		return fmt.Errorf("storage closed")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delete session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, q := range []string{
+		`DELETE FROM entries WHERE session_id = ?`,
+		`DELETE FROM documents WHERE session_id = ?`,
+		`DELETE FROM task_checkpoints WHERE session_id = ?`,
+	} {
+		if _, err := tx.Exec(q, sessionID); err != nil {
+			return fmt.Errorf("delete session %q: %w", sessionID, err)
+		}
+	}
+	return tx.Commit()
+}
