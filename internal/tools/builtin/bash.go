@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"gp/internal/tools"
@@ -118,11 +119,13 @@ func (b *BashTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (*to
 		return killProcessGroup(cmd)
 	}
 
-	var outputBuf bytes.Buffer
+	var outputBuf syncOutputBuffer
 	cmd.Stdout = &outputBuf
 	cmd.Stderr = &outputBuf
 
+	stopProgress := startBashProgressSampler(cmdCtx, ctx, &outputBuf)
 	runErr := cmd.Run()
+	stopProgress()
 
 	rawOut := outputBuf.String()
 	truncatedOut, wasTruncated := truncateOutput(rawOut, maxBashBytes, maxBashLines)
@@ -185,4 +188,135 @@ func truncateOutput(s string, maxBytes, maxLines int) (string, bool) {
 	}
 
 	return strings.Join(lines, "\n"), truncated
+}
+
+var (
+	bashProgressInitialDelay = 10 * time.Second
+	bashProgressInterval     = 15 * time.Second
+	bashStallThreshold       = 120 * time.Second
+)
+
+type syncOutputBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncOutputBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncOutputBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *syncOutputBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *syncOutputBuffer) Snapshot() (int, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := b.buf.Len()
+	if n == 0 {
+		return 0, ""
+	}
+	raw := b.buf.Bytes()
+	if len(raw) > 2048 {
+		raw = raw[len(raw)-2048:]
+	}
+	return n, extractLastNonEmptyLine(string(raw))
+}
+
+func extractLastNonEmptyLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" {
+			runes := []rune(line)
+			if len(runes) > 100 {
+				return string(runes[:100]) + "..."
+			}
+			return line
+		}
+	}
+	return ""
+}
+
+func startBashProgressSampler(cmdCtx context.Context, toolCtx *tools.ToolContext, buf *syncOutputBuffer) func() {
+	if toolCtx == nil || toolCtx.EventChan == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		startedAt := time.Now()
+		lastChangeAt := startedAt
+		lastLen := 0
+
+		timer := time.NewTimer(bashProgressInitialDelay)
+		defer timer.Stop()
+
+		select {
+		case <-done:
+			return
+		case <-cmdCtx.Done():
+			return
+		case <-timer.C:
+		}
+
+		ticker := time.NewTicker(bashProgressInterval)
+		defer ticker.Stop()
+
+		emitSample := func() {
+			curLen, tailLine := buf.Snapshot()
+			stalled := false
+			var action string
+			if curLen > lastLen {
+				lastLen = curLen
+				lastChangeAt = time.Now()
+				if tailLine != "" {
+					action = fmt.Sprintf("输出更新 (%d B): %s", curLen, tailLine)
+				} else {
+					action = fmt.Sprintf("输出更新 (%d B)", curLen)
+				}
+			} else {
+				silentFor := time.Since(lastChangeAt)
+				if silentFor >= bashStallThreshold {
+					stalled = true
+					action = fmt.Sprintf("已连续 %s 无新输出（累计 %d B），若非编译/下载请确认是否卡在等待输入", silentFor.Round(time.Second), curLen)
+				} else {
+					action = fmt.Sprintf("运行中（已耗时 %s，输出 %d B）", time.Since(startedAt).Round(time.Second), curLen)
+				}
+			}
+			select {
+			case toolCtx.EventChan <- tools.ToolEvent{
+				ToolName: "bash",
+				Action:   action,
+				Stalled:  stalled,
+			}:
+			default:
+			}
+		}
+
+		emitSample()
+		for {
+			select {
+			case <-done:
+				return
+			case <-cmdCtx.Done():
+				return
+			case <-ticker.C:
+				emitSample()
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() { close(done) })
+	}
 }

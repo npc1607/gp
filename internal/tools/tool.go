@@ -18,11 +18,12 @@ type ToolContext struct {
 	EventChan    chan<- ToolEvent
 }
 
-// ToolEvent 工具执行进度事件 (用于 TUI 动态进度展示)
+// ToolEvent 工具执行进度事件 (用于 TUI / 网关动态进度展示)
 type ToolEvent struct {
 	ToolName string
-	Action   string // 比如 "reading main.go (1~100)"
+	Action   string // 比如 "reading main.go (1~100)" 或 bash 尾部输出摘要
 	IsError  bool
+	Stalled  bool // 长时间无新输出时标记为疑似卡住
 }
 
 // ImageAttachment 描述工具返回的多模态图片附件

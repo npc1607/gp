@@ -168,12 +168,32 @@ func executeSingleTool(
 		resultContent = fmt.Sprintf("Error: tool %q not found", call.Function.Name)
 		hasExecErr = true
 	} else {
+		evCh := make(chan tools.ToolEvent, 8)
+		evDone := make(chan struct{})
+		go func() {
+			defer close(evDone)
+			for ev := range evCh {
+				a.EmitEvent(AgentEvent{
+					Type:     EventToolProgress,
+					Turn:     turn,
+					CallID:   call.ID,
+					ToolName: ev.ToolName,
+					Result:   ev.Action,
+					IsError:  ev.IsError,
+					Stalled:  ev.Stalled,
+				})
+			}
+		}()
+
 		toolCtx := &tools.ToolContext{
-			Context: ctx,
-			AgentID: a.id,
-			Cwd:     a.GetCwd(),
+			Context:   ctx,
+			AgentID:   a.id,
+			Cwd:       a.GetCwd(),
+			EventChan: evCh,
 		}
 		res, execErr := targetTool.Execute(toolCtx, call.Function.Arguments)
+		close(evCh)
+		<-evDone
 		if execErr != nil {
 			resultContent = fmt.Sprintf("Tool %s execution error: %v", call.Function.Name, execErr)
 			hasExecErr = true
