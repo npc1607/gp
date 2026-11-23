@@ -142,7 +142,8 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 			}, nil)
 		}
 
-		messages := a.maybeAutoCompact(ctx, a.buildModelMessages())
+		masked := applyObservationMasking(a.buildModelMessages(), a.GetObservationMaskWindow())
+		messages := a.maybeAutoCompact(ctx, masked)
 		a.SetStatus(StatusStreaming)
 
 		req := &ai.ChatRequest{
@@ -299,7 +300,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 			acc := toolCallsMap[idx]
 			callID := acc.id
 			if callID == "" {
-				callID = fmt.Sprintf("call_%d_%d", turn, idx)
+				callID = fmt.Sprintf("call_%d_%d_%d", time.Now().UnixNano(), turn, idx)
 			}
 			rawArgs := acc.args.String()
 			if strings.TrimSpace(rawArgs) == "" {

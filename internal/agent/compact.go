@@ -113,5 +113,5 @@ func (a *AgentInstance) maybeAutoCompact(ctx context.Context, messages []ai.Mess
 	if err != nil || res == nil || res.Summary == "" {
 		return messages
 	}
-	return a.buildModelMessages()
+	return applyObservationMasking(a.buildModelMessages(), a.GetObservationMaskWindow())
 }

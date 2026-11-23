@@ -22,6 +22,7 @@ const (
 	EventTurnStart     EventType = "turn_start"
 	EventTurnEnd       EventType = "turn_end"
 	EventToolCallStart EventType = "tool_call_start"
+	EventToolProgress  EventType = "tool_progress"
 	EventToolCallEnd   EventType = "tool_call_end"
 	EventUsage         EventType = "usage"
 )
@@ -36,6 +37,7 @@ type AgentEvent struct {
 	Args       json.RawMessage
 	Result     string
 	IsError    bool
+	Stalled    bool
 	Duration   time.Duration
 	Usage      *ai.TokenUsage
 	Outcome    string
@@ -74,22 +76,29 @@ type AgentInstance struct {
 	taskTree             *task.OwnershipTree
 	systemPrompt         string
 	thinkingLevel        string
-	contextWindow        int64
-	autoCompactThreshold float64
+	contextWindow         int64
+	autoCompactThreshold  float64
+	observationMaskWindow int
 }
 
 func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *tools.Registry) *AgentInstance {
 	initialStatus := StatusIdle
 	a := &AgentInstance{
-		id:                   id,
-		roleName:             roleName,
-		sessionTree:          session.NewInMemorySession(id),
-		toolReg:              reg,
-		provider:             provider,
-		modelName:            modelName,
-		maxTurns:             500,
-		contextWindow:        compaction.ResolveContextWindow(modelName),
-		autoCompactThreshold: 0.80,
+		id:                    id,
+		roleName:              roleName,
+		sessionTree:           session.NewInMemorySession(id),
+		toolReg:               reg,
+		provider:              provider,
+		modelName:             modelName,
+		maxTurns:              500,
+		contextWindow:         compaction.ResolveContextWindow(modelName),
+		autoCompactThreshold:  0.80,
+		observationMaskWindow: defaultObservationMaskWindow,
+	}
+	if reg != nil && len(reg.List()) > 0 {
+		if _, exists := reg.Get("restore_observation"); !exists {
+			_ = reg.Register(&restoreObservationTool{agent: a})
+		}
 	}
 	a.status.Store(&initialStatus)
 	return a
