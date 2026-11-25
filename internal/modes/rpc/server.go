@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -505,11 +506,23 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		reg = replaced
 	}
 
+	var guardAgentDirs []string
+	if homeDir != "" {
+		guardAgentDirs = append(guardAgentDirs,
+			filepath.Join(homeDir, ".gp"),
+			filepath.Join(homeDir, ".agents"),
+		)
+	}
+	if cfg != nil && len(cfg.SkillDirs) > 0 {
+		guardAgentDirs = append(guardAgentDirs, cfg.SkillDirs...)
+	}
+
 	reg = wrapRegistryWithRiskGuard(reg, &riskGuard{
 		prov:          prov,
 		modelName:     modelName,
 		userPrompt:    prompt,
 		workDir:       cwd,
+		agentDirs:     guardAgentDirs,
 		policy:        policy,
 		caller:        caller,
 		sessionID:     req.SessionID,
@@ -795,7 +808,19 @@ func applyToolPolicy(reg *tools.Registry, policy ExecutionPolicy) *tools.Registr
 			continue
 		}
 		if hasMCPRule && strings.HasPrefix(lower, "mcp__") {
-			if _, ok := mcpAllowed[lower]; !ok {
+			matched := false
+			for pat := range mcpAllowed {
+				if strings.HasSuffix(pat, "*") {
+					if strings.HasPrefix(lower, strings.TrimSuffix(pat, "*")) {
+						matched = true
+						break
+					}
+				} else if lower == pat {
+					matched = true
+					break
+				}
+			}
+			if !matched {
 				continue
 			}
 		}

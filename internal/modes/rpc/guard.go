@@ -80,6 +80,7 @@ type riskGuard struct {
 	modelName       string
 	userPrompt      string
 	workDir         string
+	agentDirs       []string
 	policy          ExecutionPolicy
 	caller          CallerContext
 	sessionID       string
@@ -192,6 +193,95 @@ func (g *guardedTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (
 	}
 
 	return g.inner.Execute(ctx, rawArgs)
+}
+
+// isAgentSensitiveFile reports whether p points to a sensitive credential/config/database file
+// inside an agent directory (e.g., auth.json, settings.json, gp.db, .env, *.key, *.pem).
+func isAgentSensitiveFile(p string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(p)))
+	switch base {
+	case "auth.json", "settings.json", "gp.db", "gp.db-wal", "gp.db-shm", "config.toml":
+		return true
+	}
+	if strings.HasPrefix(base, ".env") || strings.HasSuffix(base, ".key") || strings.HasSuffix(base, ".pem") {
+		return true
+	}
+	return false
+}
+
+// isAgentDirPath reports whether p points inside a trusted agent directory
+// (~/.gp, ~/.agents, or configured extra agentDirs/skill_dirs) and is NOT a sensitive credential/config file.
+func isAgentDirPath(p string, extraDirs []string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" || isAgentSensitiveFile(p) {
+		return false
+	}
+	evalTarget := evalPathOrClean(p)
+	if isAgentSensitiveFile(evalTarget) {
+		return false
+	}
+	roots := make([]string, 0, len(extraDirs)+2)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		roots = append(roots,
+			filepath.Join(home, ".gp"),
+			filepath.Join(home, ".agents"),
+		)
+	}
+	for _, d := range extraDirs {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		roots = append(roots, resolveTargetPath(d, ""))
+	}
+	for _, root := range roots {
+		evalRoot := evalPathOrClean(root)
+		rel, err := filepath.Rel(evalRoot, evalTarget)
+		if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+			return true
+		}
+	}
+	return false
+}
+
+// isBashMutatingCommand reports whether a shell command appears to write, edit, or delete files.
+func isBashMutatingCommand(cmd string) bool {
+	lower := strings.ToLower(cmd)
+	if strings.Contains(cmd, ">") || strings.Contains(lower, "tee ") {
+		return true
+	}
+	segments, ok := splitShellSegments(cmd)
+	if !ok {
+		fields := splitCommandFields(cmd)
+		if len(fields) == 0 {
+			return false
+		}
+		return isMutatingBin(fields)
+	}
+	for _, seg := range segments {
+		fields := splitCommandFields(seg.cmd)
+		if len(fields) > 0 && isMutatingBin(fields) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMutatingBin(fields []string) bool {
+	bin := strings.ToLower(filepath.Base(fields[0]))
+	switch bin {
+	case "rm", "mv", "cp", "touch", "mkdir", "rmdir", "chmod", "chown", "ln", "unlink", "truncate", "dd", "install", "tee":
+		return true
+	case "sed":
+		return !isReadOnlySed(fields)
+	case "find":
+		for _, f := range fields[1:] {
+			if f == "-delete" || f == "-exec" || f == "-execdir" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isTempPath reports whether p points strictly inside a standard temporary directory.
@@ -345,9 +435,45 @@ func extractToolPath(rawArgs json.RawMessage) string {
 	return ""
 }
 
+// mcpCapabilityDecision checks kind=="mcp" capability rules for an mcp__* tool.
+// Returns (hasMCPRules, allowed).
+func (g *riskGuard) mcpCapabilityDecision(lowerTool string) (bool, bool) {
+	hasMCPRule := false
+	for _, c := range g.policy.Capabilities {
+		if !strings.EqualFold(strings.TrimSpace(c.Kind), "mcp") {
+			continue
+		}
+		hasMCPRule = true
+		for _, a := range c.Allow {
+			pat := strings.ToLower(strings.TrimSpace(a))
+			if pat == "" {
+				continue
+			}
+			if strings.HasSuffix(pat, "*") {
+				if strings.HasPrefix(lowerTool, strings.TrimSuffix(pat, "*")) {
+					return true, true
+				}
+			} else if lowerTool == pat {
+				return true, true
+			}
+		}
+	}
+	return hasMCPRule, false
+}
+
+func (g *riskGuard) allowAgentDirFastPass() bool {
+	return g.effectiveBashMode() == "full"
+}
+
 // shouldSkipCheck fast-passes strictly read-only commands inside workDir and operations confined to temporary directories.
 func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage, workDir string) bool {
 	lower := strings.ToLower(strings.TrimSpace(toolName))
+
+	if strings.HasPrefix(lower, "mcp__") {
+		if hasRule, allowed := g.mcpCapabilityDecision(lower); hasRule {
+			return allowed
+		}
+	}
 
 	if g.effectiveBashMode() == "disabled" && lower == "bash" {
 		return false
@@ -355,12 +481,17 @@ func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage, wo
 	if g.effectiveBashMode() == "scoped" && lower == "bash" {
 		return g.matchesScopedBash(rawArgs, workDir)
 	}
+	if g.effectiveBashMode() == "full" && lower == "bash" && len(g.policy.Capabilities) > 0 {
+		if g.matchesScopedBash(rawArgs, workDir) {
+			return true
+		}
+	}
 	if g.policy.AllowWrite != nil && !*g.policy.AllowWrite && (lower == "write" || lower == "edit") {
 		return false
 	}
 
-	// Read-only discovery tools: fast-pass only if targeting allowed boundary or temp directory,
-	// and never matching denied_paths.
+	// Read-only discovery tools: fast-pass only if targeting allowed boundary, temp directory,
+	// or (in full mode) trusted agent directories, and never matching denied_paths.
 	if lower == "read" || lower == "grep" || lower == "find" || lower == "ls" {
 		target := extractToolPath(rawArgs)
 		if target == "" {
@@ -369,6 +500,9 @@ func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage, wo
 		absTarget := resolveTargetPath(target, workDir)
 		if _, denied := matchesDeniedPath(absTarget, workDir, g.policy.DeniedPaths); denied {
 			return false
+		}
+		if g.allowAgentDirFastPass() && isAgentDirPath(absTarget, g.agentDirs) {
+			return true
 		}
 		return isTempPath(absTarget) || isWithinAllowedBoundary(absTarget, workDir, g.policy.AllowedDirs)
 	}
@@ -429,8 +563,12 @@ func (g *riskGuard) shouldSkipCheck(toolName string, rawArgs json.RawMessage, wo
 	if !ok || len(segments) == 0 {
 		return false
 	}
+	var allowedAgentDirs []string
+	if g.allowAgentDirFastPass() {
+		allowedAgentDirs = g.agentDirs
+	}
 	for _, seg := range segments {
-		if !isSafeSingleCommand(seg.cmd, seg.isPipeSink, workDir) {
+		if !isSafeSingleCommand(seg.cmd, seg.isPipeSink, workDir, g.allowAgentDirFastPass(), allowedAgentDirs) {
 			return false
 		}
 	}
@@ -588,7 +726,7 @@ func isReadOnlySed(fields []string) bool {
 	return hasSilent
 }
 
-func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
+func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string, allowAgentDirs bool, agentDirs []string) bool {
 	fields := splitCommandFields(cmd)
 	if len(fields) == 0 {
 		return true
@@ -606,7 +744,7 @@ func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
 		}
 	}
 
-	// Any path-like argument in a read-only command must stay inside workDir or temp dirs.
+	// Any path-like argument in a read-only command must stay inside workDir, temp dirs, or (in full mode) agent dirs.
 	checkArgsWithinBoundary := func(args []string) bool {
 		for _, f := range args {
 			if strings.HasPrefix(f, "-") {
@@ -614,7 +752,7 @@ func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
 			}
 			if strings.HasPrefix(f, "/") || strings.HasPrefix(f, "~/") || f == "~" || strings.Contains(f, "..") {
 				abs := resolveTargetPath(f, workDir)
-				if !isTempPath(abs) && !isWithinWorkDir(abs, workDir) {
+				if !isTempPath(abs) && !isWithinWorkDir(abs, workDir) && !(allowAgentDirs && isAgentDirPath(abs, agentDirs)) {
 					return false
 				}
 			}
@@ -644,7 +782,7 @@ func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string) bool {
 		}
 		if len(fields) == 2 {
 			abs := resolveTargetPath(fields[1], workDir)
-			return isTempPath(abs) || isWithinWorkDir(abs, workDir)
+			return isTempPath(abs) || isWithinWorkDir(abs, workDir) || (allowAgentDirs && isAgentDirPath(abs, agentDirs))
 		}
 		return false
 	case "git":
@@ -802,6 +940,24 @@ func matchCapabilityCommand(cmd string, fields []string, workDir string, allow [
 func (g *riskGuard) staticVerdict(toolName string, rawArgs json.RawMessage, workDir string) (*riskVerdict, bool) {
 	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
 
+	if strings.HasPrefix(lowerTool, "mcp__") {
+		if hasRule, allowed := g.mcpCapabilityDecision(lowerTool); hasRule {
+			if allowed {
+				return &riskVerdict{
+					RiskLevel: "low",
+					Allow:     true,
+					Reason:    "命中已授权 MCP 能力白名单",
+				}, true
+			}
+			return &riskVerdict{
+				RiskLevel:  "high",
+				Allow:      false,
+				CanApprove: false,
+				Reason:     fmt.Sprintf("当前角色仅允许调用已授权的 MCP 工具，禁止调用 %s", toolName),
+			}, true
+		}
+	}
+
 	if lowerTool == "bash" {
 		switch g.effectiveBashMode() {
 		case "disabled":
@@ -852,7 +1008,8 @@ func (g *riskGuard) staticVerdict(toolName string, rawArgs json.RawMessage, work
 				Reason:     fmt.Sprintf("命中敏感路径黑名单（%s），严禁访问", pat),
 			}, true
 		}
-		if !isTempPath(absTarget) && !isWithinAllowedBoundary(absTarget, workDir, g.policy.AllowedDirs) {
+		isReadOnlyTool := lowerTool == "read" || lowerTool == "grep" || lowerTool == "find" || lowerTool == "ls"
+		if !isTempPath(absTarget) && !isWithinAllowedBoundary(absTarget, workDir, g.policy.AllowedDirs) && !(g.allowAgentDirFastPass() && isReadOnlyTool && isAgentDirPath(absTarget, g.agentDirs)) {
 			if target == "" && len(g.policy.AllowedDirs) > 0 {
 				return &riskVerdict{
 					RiskLevel:  "high",
@@ -890,19 +1047,25 @@ func (g *riskGuard) staticVerdict(toolName string, rawArgs json.RawMessage, work
 		}
 	}
 
-	return staticRiskVerdict(toolName, rawArgs, workDir)
+	return staticRiskVerdictWithAgentDirs(toolName, rawArgs, workDir, g.allowAgentDirFastPass(), g.agentDirs)
 }
 
 // staticRiskVerdict provides 0ms static classification for out-of-workspace access and unmistakably dangerous commands.
 func staticRiskVerdict(toolName string, rawArgs json.RawMessage, workDir string) (*riskVerdict, bool) {
+	return staticRiskVerdictWithAgentDirs(toolName, rawArgs, workDir, false, nil)
+}
+
+func staticRiskVerdictWithAgentDirs(toolName string, rawArgs json.RawMessage, workDir string, allowAgentDirs bool, agentDirs []string) (*riskVerdict, bool) {
 	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
 
-	// Any read/grep/find/ls/write/edit targeting outside workDir (and not temp) requires admin approval.
+	// Any read/grep/find/ls/write/edit targeting outside workDir (and not temp) requires admin approval,
+	// except read-only tools targeting trusted agent directories in full mode.
 	if lowerTool == "read" || lowerTool == "grep" || lowerTool == "find" || lowerTool == "ls" || lowerTool == "write" || lowerTool == "edit" {
 		target := extractToolPath(rawArgs)
 		if target != "" {
 			absTarget := resolveTargetPath(target, workDir)
-			if !isTempPath(absTarget) && !isWithinWorkDir(absTarget, workDir) {
+			isReadOnly := lowerTool == "read" || lowerTool == "grep" || lowerTool == "find" || lowerTool == "ls"
+			if !isTempPath(absTarget) && !isWithinWorkDir(absTarget, workDir) && !(allowAgentDirs && isReadOnly && isAgentDirPath(absTarget, agentDirs)) {
 				return &riskVerdict{
 					RiskLevel:  "high",
 					Allow:      false,
@@ -961,6 +1124,9 @@ func staticRiskVerdict(toolName string, rawArgs json.RawMessage, workDir string)
 			}
 			abs := resolveTargetPath(cleanTok, workDir)
 			if !isTempPath(abs) && !isWithinWorkDir(abs, workDir) {
+				if allowAgentDirs && isAgentDirPath(abs, agentDirs) && !isBashMutatingCommand(cmd) {
+					continue
+				}
 				return &riskVerdict{
 					RiskLevel:  "high",
 					Allow:      false,

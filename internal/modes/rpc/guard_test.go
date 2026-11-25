@@ -571,3 +571,140 @@ func TestRiskGuardScopedBashAndCapabilities(t *testing.T) {
 		}
 	}
 }
+
+func TestRiskGuardAgentDirAndMCPCapabilities(t *testing.T) {
+	fakeHome := "/opt/test-agent-home"
+	t.Setenv("HOME", fakeHome)
+	gpDir := fakeHome + "/.gp"
+	skillFile := gpDir + "/skills/anidoodle/SKILL.md"
+	skillScript := gpDir + "/skills/anidoodle/render.py"
+	authFile := gpDir + "/auth.json"
+
+	ctx := &tools.ToolContext{Context: context.Background(), Cwd: "/workspace/services"}
+
+	// --- 1. Full mode: agentDirs read/exec allowed, sensitive files & mutations require approval ---
+	vpFull := &verdictProvider{verdictJSON: `{"risk_level":"low","allow":true,"reason":"ok"}`}
+	readStub := &stubTool{name: "read"}
+	writeStub := &stubTool{name: "write"}
+	bashStub := &stubTool{name: "bash"}
+	mcpAllowedStub := &stubTool{name: "mcp__feishu__read_doc"}
+	mcpBlockedStub := &stubTool{name: "mcp__feishu__delete_doc"}
+
+	rawReg := tools.NewRegistry()
+	_ = rawReg.Register(readStub)
+	_ = rawReg.Register(writeStub)
+	_ = rawReg.Register(bashStub)
+	_ = rawReg.Register(mcpAllowedStub)
+	_ = rawReg.Register(mcpBlockedStub)
+
+	apprPrompts := 0
+	fullGuarded := wrapRegistryWithRiskGuard(rawReg, &riskGuard{
+		prov:      vpFull,
+		modelName: "mock/reviewer",
+		workDir:   "/workspace/services",
+		agentDirs: []string{gpDir},
+		policy: ExecutionPolicy{
+			WorkDir:     "/workspace/services",
+			AllowedDirs: []string{"/workspace/services/data-service"},
+		},
+		caller: CallerContext{SenderID: "ou_boss", IsBoss: true, AllowApproval: true},
+		cache:  newAuditCache(time.Minute),
+		requestApproval: func(_ context.Context, _ string, _ string, _ json.RawMessage) (bool, error) {
+			apprPrompts++
+			return false, nil // reject so we can assert approval was triggered
+		},
+	})
+
+	rt, _ := fullGuarded.Get("read")
+	wt, _ := fullGuarded.Get("write")
+	bt, _ := fullGuarded.Get("bash")
+
+	// Read skill file -> 0ms pass (no audit, no approval)
+	rawReadSkill, _ := json.Marshal(map[string]string{"path": skillFile})
+	if _, err := rt.Execute(ctx, rawReadSkill); err != nil {
+		t.Fatalf("expected read on agent skill file to pass, got: %v", err)
+	}
+	// Read-only bash on skill dir -> 0ms pass
+	rawLsSkill, _ := json.Marshal(map[string]string{"command": "ls " + gpDir + "/skills/anidoodle"})
+	if _, err := bt.Execute(ctx, rawLsSkill); err != nil {
+		t.Fatalf("expected ls on agent skill dir to pass, got: %v", err)
+	}
+	if vpFull.calls != 0 || apprPrompts != 0 {
+		t.Fatalf("expected 0ms fast-pass for agent dir reads, got vp=%d appr=%d", vpFull.calls, apprPrompts)
+	}
+
+	// Non-mutating script execution in skill dir -> NOT statically blocked (goes through audit and passes)
+	rawRunSkill, _ := json.Marshal(map[string]string{"command": "python3 " + skillScript + " /tmp/out.png"})
+	if _, err := bt.Execute(ctx, rawRunSkill); err != nil {
+		t.Fatalf("expected running agent skill script to pass without static approval, got: %v", err)
+	}
+	if apprPrompts != 0 {
+		t.Fatalf("expected no approval prompt for running skill script, got %d", apprPrompts)
+	}
+
+	// Sensitive auth.json in ~/.gp -> MUST require approval
+	rawReadAuth, _ := json.Marshal(map[string]string{"path": authFile})
+	if _, err := rt.Execute(ctx, rawReadAuth); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected reading auth.json to require approval, got: %v", err)
+	}
+	// Writing to skill dir -> MUST require approval
+	rawWriteSkill, _ := json.Marshal(map[string]string{"path": skillFile, "content": "hacked"})
+	if _, err := wt.Execute(ctx, rawWriteSkill); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected writing to agent skill dir to require approval, got: %v", err)
+	}
+	// Mutating bash on skill dir -> MUST require approval
+	rawTouchSkill, _ := json.Marshal(map[string]string{"command": "touch " + gpDir + "/skills/anidoodle/new.txt"})
+	if _, err := bt.Execute(ctx, rawTouchSkill); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected mutating bash on agent skill dir to require approval, got: %v", err)
+	}
+	if apprPrompts != 3 {
+		t.Fatalf("expected 3 approval prompts (auth.json, write, touch), got %d", apprPrompts)
+	}
+
+	// --- 2. Scoped mode: agentDirs NOT auto-allowed; MCP capability whitelist enforced ---
+	scopedAppr := 0
+	scopedPolicy := ExecutionPolicy{
+		WorkDir:     "/workspace/services",
+		AllowedDirs: []string{"/workspace/services/data-service"},
+		BashMode:    "scoped",
+		Capabilities: []CapabilityRule{
+			{Kind: "mcp", Name: "feishu-read", Allow: []string{"mcp__feishu__read_*"}},
+		},
+	}
+	scopedGuarded := wrapRegistryWithRiskGuard(rawReg, &riskGuard{
+		prov:      &verdictProvider{verdictJSON: `{"risk_level":"low","allow":true,"reason":"ok"}`},
+		modelName: "mock/reviewer",
+		workDir:   "/workspace/services",
+		agentDirs: []string{gpDir},
+		policy:    scopedPolicy,
+		caller:    CallerContext{SenderID: "ou_boss", IsBoss: true, AllowApproval: true},
+		cache:     newAuditCache(time.Minute),
+		requestApproval: func(_ context.Context, _ string, _ string, _ json.RawMessage) (bool, error) {
+			scopedAppr++
+			return false, nil
+		},
+	})
+
+	// Unconfigured bash in ~/.gp/skills -> hard rejected in scoped mode (CanApprove=false, scopedAppr stays 0)
+	sBt, _ := scopedGuarded.Get("bash")
+	if _, err := sBt.Execute(ctx, rawLsSkill); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected scoped mode to block unconfigured agent skill bash, got: %v", err)
+	}
+	if scopedAppr != 0 {
+		t.Fatalf("expected scoped bash rejection to be non-approvable (0 prompts), got %d", scopedAppr)
+	}
+
+	// Allowlisted MCP wildcard -> 0ms pass
+	sMcpAllow, _ := scopedGuarded.Get("mcp__feishu__read_doc")
+	if _, err := sMcpAllow.Execute(ctx, json.RawMessage(`{"ref":"doc1"}`)); err != nil {
+		t.Fatalf("expected allowlisted MCP wildcard tool to pass, got: %v", err)
+	}
+	// Non-allowlisted MCP -> hard rejected (CanApprove=false)
+	sMcpBlock, _ := scopedGuarded.Get("mcp__feishu__delete_doc")
+	if _, err := sMcpBlock.Execute(ctx, json.RawMessage(`{"ref":"doc1"}`)); err == nil || !strings.Contains(err.Error(), "SECURITY_BLOCKED") {
+		t.Fatalf("expected non-allowlisted MCP tool to be hard rejected, got: %v", err)
+	}
+	if scopedAppr != 0 {
+		t.Fatalf("expected non-allowlisted MCP rejection to be non-approvable (0 prompts), got %d", scopedAppr)
+	}
+}
