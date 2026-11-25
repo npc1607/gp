@@ -553,6 +553,11 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 	ag.SetCwd(cwd)
 
 	resLoader := resources.NewResourceLoader(cwd, homeDir)
+	if cfg != nil {
+		resLoader.SetExtraSkillDirs(cfg.SkillDirs)
+		resLoader.SetDisabledSkills(cfg.DisabledSkills)
+		resLoader.SetUnregisteredSkills(cfg.UnregisteredSkills)
+	}
 	if sysPrompt := resLoader.BuildSystemPrompt(cfg.SystemPrompt); sysPrompt != "" {
 		ag.SetSystemPrompt(sysPrompt)
 	}

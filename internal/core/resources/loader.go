@@ -122,9 +122,14 @@ func (r *ResourceLoader) LoadSkills() ([]Skill, error) {
 
 	// 3. 扫描用户配置的额外技能目录
 	for _, dir := range r.extraSkillDirs {
-		if strings.TrimSpace(dir) != "" {
-			r.scanSkillsDir(dir, "custom", skillsMap)
+		trimmed := strings.TrimSpace(dir)
+		if trimmed == "" {
+			continue
 		}
+		if strings.HasPrefix(trimmed, "~/") && r.homeDir != "" {
+			trimmed = filepath.Join(r.homeDir, strings.TrimPrefix(trimmed, "~/"))
+		}
+		r.scanSkillsDir(trimmed, "custom", skillsMap)
 	}
 
 	var result []Skill
@@ -230,8 +235,13 @@ func (r *ResourceLoader) BuildSystemPrompt(basePrompt string) string {
 				sb.WriteString("# Available Domain Skills\n\n")
 				for _, s := range enabledSkills {
 					fmt.Fprintf(&sb, "## Skill: %s\n", s.Name)
+					if s.Path != "" {
+						fmt.Fprintf(&sb, "**Path**: %s (dir: %s)\n", s.Path, filepath.Dir(s.Path))
+					}
 					if s.Description != "" {
 						fmt.Fprintf(&sb, "**Description**: %s\n\n", s.Description)
+					} else if s.Path != "" {
+						sb.WriteString("\n")
 					}
 					if s.Instructions != "" {
 						sb.WriteString(s.Instructions)
