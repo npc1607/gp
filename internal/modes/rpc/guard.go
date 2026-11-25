@@ -159,6 +159,13 @@ func (g *guardedTool) Execute(ctx *tools.ToolContext, rawArgs json.RawMessage) (
 	if staticV, matched := g.guard.staticVerdict(g.inner.Name(), rawArgs, workDir); matched {
 		verdict = staticV
 	} else {
+		if g.guard.caller.AllowApproval && g.guard.approvedCache != nil {
+			if apprKey := buildApprovalCacheKey(g.guard.scopePrefix(), g.inner.Name(), rawArgs, workDir); apprKey != "" {
+				if _, ok := g.guard.approvedCache.get(apprKey); ok {
+					return g.inner.Execute(ctx, rawArgs)
+				}
+			}
+		}
 		verdict, err = g.guard.assess(ctx.Context, g.inner.Name(), rawArgs, workDir)
 		if err != nil {
 			return nil, fmt.Errorf("安全审计子 Agent 评估失败，基于安全原则拒绝执行 %s 操作 (%v)；禁止执行高风险操作", g.inner.Name(), err)
@@ -1148,7 +1155,7 @@ func extractResourceID(rawArgs json.RawMessage) string {
 		return ""
 	}
 	for _, key := range []string{
-		"document_id", "doc_id", "wiki_token", "node_token",
+		"document_id", "doc_id", "doc", "ref", "wiki_token", "node_token",
 		"spreadsheet_token", "app_token", "table_id", "chat_id",
 	} {
 		if v, ok := args[key].(string); ok && strings.TrimSpace(v) != "" {
@@ -1421,12 +1428,18 @@ func (g *riskGuard) assess(ctx context.Context, toolName string, rawArgs json.Ra
 
 	if g.emit != nil {
 		if !verdict.Allow || strings.EqualFold(verdict.RiskLevel, "high") {
-			perm := verdict.RequiredPermission
-			if perm == "" {
-				perm = "需要更高级别权限或人工确认"
+			var msg string
+			if verdict.CanApprove && g.caller.AllowApproval && g.requestApproval != nil {
+				msg = fmt.Sprintf("🔐 **需管理员确认**（工具：`%s`，风险等级：`%s`）\n- **原因**：%s\n- **状态**：已发起管理员审批，等待确认后继续执行",
+					toolName, verdict.RiskLevel, verdict.Reason)
+			} else {
+				perm := verdict.RequiredPermission
+				if perm == "" {
+					perm = "需要更高级别权限或人工确认"
+				}
+				msg = fmt.Sprintf("⛔ **高风险操作已拦截**（工具：`%s`，风险等级：`%s`）\n- **原因**：%s\n- **权限要求**：%s\n- **操作参数**：\n```json\n%s\n```",
+					toolName, verdict.RiskLevel, verdict.Reason, perm, strings.TrimSpace(string(rawArgs)))
 			}
-			msg := fmt.Sprintf("⛔ **高风险操作已拦截**（工具：`%s`，风险等级：`%s`）\n- **原因**：%s\n- **权限要求**：%s\n- **操作参数**：\n```json\n%s\n```",
-				toolName, verdict.RiskLevel, verdict.Reason, perm, strings.TrimSpace(string(rawArgs)))
 			g.emit(Event{
 				ID:        g.reqID,
 				Event:     EventSubagentEnd,

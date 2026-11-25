@@ -424,6 +424,58 @@ func TestRiskGuardWhoResourceAndApprovalCache(t *testing.T) {
 	}
 }
 
+func TestRiskGuardApprovalEventTextAndRefCache(t *testing.T) {
+	vp := &verdictProvider{
+		verdictJSON: `{"risk_level":"high","allow":false,"can_approve":true,"reason":"修改外部飞书文档需管理员确认"}`,
+	}
+	insertStub := &stubTool{name: "mcp__feishu-mcp__feishu_insert_blocks"}
+	reg := tools.NewRegistry()
+	_ = reg.Register(insertStub)
+
+	var subagentEndTexts []string
+	apprCalls := 0
+	guarded := wrapRegistryWithRiskGuard(reg, &riskGuard{
+		prov:          vp,
+		modelName:     "mock/reviewer",
+		workDir:       "/workspace",
+		sessionID:     "sess-ref",
+		caller:        CallerContext{SenderID: "ou_boss", IsBoss: true, AllowApproval: true},
+		cache:         newAuditCache(time.Minute),
+		approvedCache: newAuditCache(time.Minute),
+		emit: func(ev Event) {
+			if ev.Event == EventSubagentEnd {
+				subagentEndTexts = append(subagentEndTexts, ev.Text)
+			}
+		},
+		requestApproval: func(_ context.Context, _ string, _ string, _ json.RawMessage) (bool, error) {
+			apprCalls++
+			return true, nil
+		},
+	})
+
+	tool, _ := guarded.Get("mcp__feishu-mcp__feishu_insert_blocks")
+	ctx := &tools.ToolContext{Context: context.Background(), Cwd: "/workspace"}
+
+	// First call: triggers risk_guard once + approval once, and subagent text should say 需管理员确认 (not 已拦截)
+	if _, err := tool.Execute(ctx, json.RawMessage(`{"ref":"H2TiwPoK2ixzdEkRSGwcu2SLnJd","index":0,"blocks":[]}`)); err != nil {
+		t.Fatalf("expected first approved call to succeed, got: %v", err)
+	}
+	if vp.calls != 1 || apprCalls != 1 {
+		t.Fatalf("expected 1 audit + 1 approval, got vp=%d appr=%d", vp.calls, apprCalls)
+	}
+	if len(subagentEndTexts) != 1 || !strings.Contains(subagentEndTexts[0], "需管理员确认") || strings.Contains(subagentEndTexts[0], "高风险操作已拦截") {
+		t.Fatalf("unexpected subagent end text: %+v", subagentEndTexts)
+	}
+
+	// Second call to same ref: hits approvedCache directly without re-running risk_guard or re-prompting
+	if _, err := tool.Execute(ctx, json.RawMessage(`{"ref":"H2TiwPoK2ixzdEkRSGwcu2SLnJd","index":1,"blocks":[]}`)); err != nil {
+		t.Fatalf("expected second call to same ref to pass via approval cache, got: %v", err)
+	}
+	if vp.calls != 1 || apprCalls != 1 {
+		t.Fatalf("expected cached ref to skip both audit and approval, got vp=%d appr=%d", vp.calls, apprCalls)
+	}
+}
+
 func TestRiskGuardRolePolicyEnforcement(t *testing.T) {
 	baseDir := "/workspace/services"
 	dataSvc := baseDir + "/data-service"

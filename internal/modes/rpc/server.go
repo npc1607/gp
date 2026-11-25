@@ -702,14 +702,16 @@ func (s *Server) requestApproval(ctx context.Context, reqID string, emit func(Ev
 		Args:       argsMap,
 	})
 
-	timer := time.NewTimer(60 * time.Second)
+	// Keep a 5s buffer over gateway's 60s approval timeout so the gateway always
+	// expires first, updates the approval card UI, and sends the rejection cleanly.
+	timer := time.NewTimer(65 * time.Second)
 	defer timer.Stop()
 
 	select {
 	case approved := <-ch:
 		return approved, nil
 	case <-timer.C:
-		return false, fmt.Errorf("等待管理员确认超时（60s）")
+		return false, fmt.Errorf("等待管理员确认超时（65s）")
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
