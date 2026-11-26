@@ -98,6 +98,8 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 	if maxTurns <= 0 {
 		maxTurns = 500
 	}
+	toolsTokens := estimateToolsTokens(toolDefs)
+	baseTurnIdx := a.nextMetricTurnBase()
 
 	runStart := time.Now()
 	runOutcome := "error"
@@ -142,8 +144,12 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 			}, nil)
 		}
 
-		masked := applyObservationMasking(a.buildModelMessages(), a.GetObservationMaskWindow())
-		messages := a.maybeAutoCompact(ctx, masked)
+		assembled, ctxMeta := a.assembleModelMessagesWithMetrics()
+		ctxMeta.toolsTokens = toolsTokens
+		messages, compactedMeta, compacted := a.maybeAutoCompactWithMeta(ctx, assembled, toolsTokens)
+		if compacted {
+			ctxMeta = compactedMeta
+		}
 		a.SetStatus(StatusStreaming)
 
 		req := &ai.ChatRequest{
@@ -182,6 +188,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		streamHandler := a.GetStreamHandler()
 		var streamErr error
 		var sawUsage bool
+		var latestUsage *ai.TokenUsage
 
 		for chunk := range chunkChan {
 			if chunk.Error != nil {
@@ -247,7 +254,11 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 					acc.callType = tc.Type
 				}
 				if tc.Function.Name != "" {
-					acc.name += tc.Function.Name
+					if acc.name == "" {
+						acc.name = tc.Function.Name
+					} else if acc.name != tc.Function.Name && (tc.Index != nil || tc.ID != "") {
+						acc.name += tc.Function.Name
+					}
 				}
 				if len(tc.Function.Arguments) > 0 {
 					acc.args.Write(tc.Function.Arguments)
@@ -256,6 +267,8 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 			if chunk.Usage != nil {
 				sawUsage = true
+				uCopy := *chunk.Usage
+				latestUsage = &uCopy
 				a.EmitEvent(AgentEvent{
 					Type:  EventUsage,
 					Turn:  turn,
@@ -280,14 +293,15 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		if !sawUsage {
 			estIn := compaction.EstimateMessagesTokens(messages)
 			estOut := compaction.EstimateTextTokens(textDelta.String()) + compaction.EstimateTextTokens(thinkingDelta.String())
+			latestUsage = &ai.TokenUsage{
+				InputTokens:  estIn,
+				OutputTokens: estOut,
+				TotalTokens:  estIn + estOut,
+			}
 			a.EmitEvent(AgentEvent{
-				Type: EventUsage,
-				Turn: turn,
-				Usage: &ai.TokenUsage{
-					InputTokens:  estIn,
-					OutputTokens: estOut,
-					TotalTokens:  estIn + estOut,
-				},
+				Type:  EventUsage,
+				Turn:  turn,
+				Usage: latestUsage,
 			})
 		}
 
@@ -319,6 +333,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 		// 纯文本输出收敛退出
 		if len(finalToolCalls) == 0 {
+			a.recordTurnContextMetric(ctx, baseTurnIdx+turn+1, ctxMeta, latestUsage, 0, 0)
 			a.sessionTree.AppendMessage(ai.Message{
 				Role:              ai.RoleAssistant,
 				Content:           textDelta.String(),
@@ -346,6 +361,16 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 		a.SetStatus(StatusToolExecuting)
 
+		recallCalls, restoreCalls := 0, 0
+		for _, tc := range finalToolCalls {
+			switch tc.Function.Name {
+			case "recall_entries":
+				recallCalls++
+			case "restore_observation":
+				restoreCalls++
+			}
+		}
+
 		outcomes, execBatchErr := executeToolBatch(ctx, a, turn, genTaskID, sessTaskID, taskTree, finalToolCalls)
 		if execBatchErr != nil {
 			a.SetStatus(StatusSettled)
@@ -360,6 +385,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 				Timestamp:  time.Now(),
 			})
 		}
+		a.recordTurnContextMetric(ctx, baseTurnIdx+turn+1, ctxMeta, latestUsage, recallCalls, restoreCalls)
 	}
 
 	a.SetStatus(StatusSettled)
@@ -367,4 +393,12 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		_ = taskTree.UpdateTask(ctx, sessTaskID, task.TaskStatusFailed, nil)
 	}
 	return "", fmt.Errorf("agent exceeded maximum allowed turns (%d)", maxTurns)
+}
+
+func estimateToolsTokens(toolDefs []json.RawMessage) int64 {
+	var total int64
+	for _, raw := range toolDefs {
+		total += compaction.EstimateTextTokens(string(raw)) + 8
+	}
+	return total
 }

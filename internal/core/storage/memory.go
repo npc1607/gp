@@ -13,21 +13,24 @@ var _ Storage = (*MemoryStorage)(nil)
 
 // MemoryStorage 纯内存存储实现，用于单测与轻量子 Agent
 type MemoryStorage struct {
-	mu          sync.RWMutex
-	entries     map[string][]*Entry             // session_id -> list of entries
-	entryByID   map[string]*Entry               // entry_id -> entry
-	documents   map[string]map[string]*Document // session_id -> doc_key -> document
-	checkpoints map[string]*TaskCheckpoint      // task_id -> checkpoint
-	closed      bool
+	mu             sync.RWMutex
+	entries        map[string][]*Entry             // session_id -> list of entries
+	entryByID      map[string]*Entry               // entry_id -> entry
+	documents      map[string]map[string]*Document // session_id -> doc_key -> document
+	checkpoints    map[string]*TaskCheckpoint      // task_id -> checkpoint
+	contextMetrics map[string][]ContextMetric      // session_id -> ordered metrics
+	nextMetricID   int64
+	closed         bool
 }
 
 // NewMemoryStorage 创建新的纯内存存储实例
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		entries:     make(map[string][]*Entry),
-		entryByID:   make(map[string]*Entry),
-		documents:   make(map[string]map[string]*Document),
-		checkpoints: make(map[string]*TaskCheckpoint),
+		entries:        make(map[string][]*Entry),
+		entryByID:      make(map[string]*Entry),
+		documents:      make(map[string]map[string]*Document),
+		checkpoints:    make(map[string]*TaskCheckpoint),
+		contextMetrics: make(map[string][]ContextMetric),
 	}
 }
 
@@ -339,10 +342,73 @@ func (m *MemoryStorage) DeleteSession(sessionID string) error {
 	}
 	delete(m.entries, sessionID)
 	delete(m.documents, sessionID)
+	delete(m.contextMetrics, sessionID)
 	for tid, cp := range m.checkpoints {
 		if cp.SessionID == sessionID {
 			delete(m.checkpoints, tid)
 		}
 	}
 	return nil
+}
+
+// RecordContextMetric 追加一条上下文可观测指标记录
+func (m *MemoryStorage) RecordContextMetric(ctx context.Context, metric *ContextMetric) error {
+	if metric == nil || metric.SessionID == "" {
+		return fmt.Errorf("context metric SessionID cannot be empty")
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return fmt.Errorf("storage closed")
+	}
+	m.nextMetricID++
+	cp := *metric
+	cp.ID = m.nextMetricID
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = time.Now()
+	}
+	m.contextMetrics[cp.SessionID] = append(m.contextMetrics[cp.SessionID], cp)
+	metric.ID = cp.ID
+	metric.CreatedAt = cp.CreatedAt
+	return nil
+}
+
+// ListContextMetrics 按最近插入倒序返回指定会话的上下文可观测指标
+func (m *MemoryStorage) ListContextMetrics(sessionID string, limit int) ([]ContextMetric, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return nil, fmt.Errorf("storage closed")
+	}
+	list := m.contextMetrics[sessionID]
+	if len(list) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > len(list) {
+		limit = len(list)
+	}
+	out := make([]ContextMetric, 0, limit)
+	for i := len(list) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, list[i])
+	}
+	return out, nil
+}
+
+// GetContextMetricTotals 汇总指定会话的累计轮次与 recall/restore 调用次数
+func (m *MemoryStorage) GetContextMetricTotals(sessionID string) (ContextMetricTotals, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return ContextMetricTotals{}, fmt.Errorf("storage closed")
+	}
+	list := m.contextMetrics[sessionID]
+	totals := ContextMetricTotals{TurnCount: len(list)}
+	for _, item := range list {
+		totals.TotalRecallCalls += item.RecallCalls
+		totals.TotalRestoreCalls += item.RestoreCalls
+	}
+	return totals, nil
 }

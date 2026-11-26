@@ -10,7 +10,11 @@ import (
 )
 
 const (
-	defaultObservationMaskWindow = 5
+	DefaultObservationMaskWindow = 5
+	DefaultObservationMaskEpoch  = 16
+
+	defaultObservationMaskWindow = DefaultObservationMaskWindow
+	defaultObservationMaskEpoch  = DefaultObservationMaskEpoch
 	minMaskBytes                 = 400
 	minMaskLines                 = 8
 	defaultRestoreMaxLines       = 200
@@ -31,6 +35,21 @@ func (a *AgentInstance) GetObservationMaskWindow() int {
 	return a.observationMaskWindow
 }
 
+// SetObservationMaskEpoch configures the discrete Epoch stride for frozen observation masking.
+// Default is 16; values <= 0 disable epoch alignment (falling back to window-only masking).
+func (a *AgentInstance) SetObservationMaskEpoch(epoch int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.observationMaskEpoch = epoch
+}
+
+// GetObservationMaskEpoch returns the active Epoch stride for frozen observation masking.
+func (a *AgentInstance) GetObservationMaskEpoch() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.observationMaskEpoch
+}
+
 // applyObservationMasking keeps tool outputs from the most recent windowTurns
 // tool-calling assistant turns verbatim, and replaces older verbose RoleTool outputs
 // with compact reversible DTOC placeholders without mutating SessionTree.
@@ -39,23 +58,132 @@ func applyObservationMasking(messages []ai.Message, windowTurns int) []ai.Messag
 		return messages
 	}
 
-	// Walk backwards to locate the cutoff assistant message that starts the recent window.
-	toolTurns := 0
-	cutoffIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == ai.RoleAssistant && len(messages[i].ToolCalls) > 0 {
-			toolTurns++
-			if toolTurns == windowTurns {
-				cutoffIdx = i
-				break
-			}
-		}
-	}
+	cutoffIdx := findToolWindowCutoff(messages, windowTurns)
 	if cutoffIdx <= 0 {
 		return messages
 	}
 
-	// Map toolCallID -> toolName across the linear history for informative placeholders.
+	out, _ := maskToolOutputsBefore(messages, cutoffIdx)
+	return out
+}
+
+// applyEpochObservationMasking freezes the observation mask boundary at discrete Epoch strides
+// (default Epoch=16) so that within the same Epoch, earlier masked outputs stay byte-identical
+// and newly appended turns remain strictly Append-Only at the tail.
+func applyEpochObservationMasking(messages []ai.Message, epochStride, minRecentToolTurns int) []ai.Message {
+	out, _, _, _ := ApplyEpochObservationMaskingWithStats(messages, epochStride, minRecentToolTurns)
+	return out
+}
+
+// ApplyEpochObservationMaskingWithStats applies Epoch-frozen masking and returns the masked slice,
+// active epochID, freezeBoundary index, and number of folded tool outputs.
+func ApplyEpochObservationMaskingWithStats(messages []ai.Message, epochStride, minRecentToolTurns int) (out []ai.Message, epochID int, freezeBoundary int, maskedCount int) {
+	out, epochID, freezeBoundary, maskedCount, _ = ApplyEpochObservationMaskingWithOffset(messages, epochStride, minRecentToolTurns, 0)
+	return out, epochID, freezeBoundary, maskedCount
+}
+
+// ApplyEpochObservationMaskingWithOffset applies Epoch-frozen masking using priorOffset
+// (count of compacted historical messages prior to messages[0]) so Epoch progress remains
+// monotonic across compactions and folded counts reflect compacted + masked tool outputs.
+func ApplyEpochObservationMaskingWithOffset(messages []ai.Message, epochStride, minRecentToolTurns, priorOffset int) (out []ai.Message, epochID int, freezeBoundary int, maskedCount int, epochPos int) {
+	if priorOffset < 0 {
+		priorOffset = 0
+	}
+	if minRecentToolTurns <= 0 || len(messages) == 0 {
+		if epochStride > 1 && priorOffset > 0 {
+			epochID = priorOffset / epochStride
+		}
+		return messages, epochID, 0, 0, 0
+	}
+	if epochStride <= 1 {
+		cutoff := FindToolWindowCutoff(messages, minRecentToolTurns)
+		if cutoff <= 0 {
+			return messages, 0, 0, 0, 0
+		}
+		out, maskedCount = maskToolOutputsBefore(messages, cutoff)
+		return out, 0, cutoff, maskedCount, 0
+	}
+
+	recentCutoff := FindToolWindowCutoff(messages, minRecentToolTurns)
+	if recentCutoff <= 0 {
+		// Fallback safeguard: if cumulative history has already crossed at least 1 Epoch and
+		// older oversized tool outputs remain outside a recent message tail, advance cutoff to
+		// fold them instead of keeping Epoch frozen at #0 forever.
+		if priorOffset+len(messages) >= epochStride && hasMaskableToolOutput(messages) {
+			if fallback := findTailMessageCutoff(messages, minRecentToolTurns*2); fallback > 0 {
+				recentCutoff = fallback
+			}
+		}
+	}
+	if recentCutoff <= 0 {
+		if priorOffset > 0 {
+			globalEnd := priorOffset + len(messages)
+			epochID = globalEnd / epochStride
+			epochPos = globalEnd % epochStride
+		}
+		return messages, epochID, 0, 0, epochPos
+	}
+
+	globalCutoff := priorOffset + recentCutoff
+	globalFreeze := (globalCutoff / epochStride) * epochStride
+	epochID = globalFreeze / epochStride
+	epochPos = globalCutoff - globalFreeze
+
+	freezeBoundary = globalFreeze - priorOffset
+	if freezeBoundary < 0 {
+		freezeBoundary = 0
+	}
+	if freezeBoundary > len(messages) {
+		freezeBoundary = len(messages)
+	}
+	if freezeBoundary <= 0 {
+		return messages, epochID, 0, 0, epochPos
+	}
+
+	out, maskedCount = maskToolOutputsBefore(messages, freezeBoundary)
+	return out, epochID, freezeBoundary, maskedCount, epochPos
+}
+
+func hasMaskableToolOutput(messages []ai.Message) bool {
+	for _, m := range messages {
+		if m.Role == ai.RoleTool && shouldMaskObservation(m.Content) {
+			return true
+		}
+	}
+	return false
+}
+
+func findTailMessageCutoff(messages []ai.Message, keepTail int) int {
+	if len(messages) <= keepTail || keepTail <= 0 {
+		return -1
+	}
+	idx := len(messages) - keepTail
+	// Avoid splitting right after an assistant tool_call before its tool_result.
+	for idx > 0 && messages[idx].Role == ai.RoleTool {
+		idx--
+	}
+	return idx
+}
+
+// FindToolWindowCutoff locates the start index of the most recent windowTurns tool-calling turns.
+func FindToolWindowCutoff(messages []ai.Message, windowTurns int) int {
+	return findToolWindowCutoff(messages, windowTurns)
+}
+
+func findToolWindowCutoff(messages []ai.Message, windowTurns int) int {
+	toolTurns := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == ai.RoleAssistant && len(messages[i].ToolCalls) > 0 {
+			toolTurns++
+			if toolTurns == windowTurns {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func maskToolOutputsBefore(messages []ai.Message, boundary int) ([]ai.Message, int) {
 	callNames := make(map[string]string)
 	for _, m := range messages {
 		if m.Role == ai.RoleAssistant {
@@ -70,8 +198,13 @@ func applyObservationMasking(messages []ai.Message, windowTurns int) []ai.Messag
 	out := make([]ai.Message, len(messages))
 	copy(out, messages)
 
-	for i := 0; i < cutoffIdx; i++ {
+	maskedCount := 0
+	for i := 0; i < boundary; i++ {
 		if out[i].Role != ai.RoleTool {
+			continue
+		}
+		if strings.HasPrefix(out[i].Content, "[已折叠历史工具输出:") || strings.HasPrefix(out[i].Content, "[compacted tool output:") {
+			maskedCount++
 			continue
 		}
 		if !shouldMaskObservation(out[i].Content) {
@@ -87,8 +220,9 @@ func applyObservationMasking(messages []ai.Message, windowTurns int) []ai.Messag
 			"[已折叠历史工具输出: tool=%s call_id=%s | 原文 %d 行 / %s; 若后续确需查看原文，请调用 restore_observation(call_id=%q)]",
 			toolName, out[i].ToolCallID, lines, sizeStr, out[i].ToolCallID,
 		)
+		maskedCount++
 	}
-	return out
+	return out, maskedCount
 }
 
 func shouldMaskObservation(content string) bool {
@@ -163,10 +297,11 @@ func (t *restoreObservationTool) Execute(_ *tools.ToolContext, rawArgs json.RawM
 
 	var found string
 	var ok bool
-	msgs := st.GetLinearContext()
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == ai.RoleTool && msgs[i].ToolCallID == callID {
-			found = msgs[i].Content
+	entries := st.GetBranchEntries()
+	for i := len(entries) - 1; i >= 0; i-- {
+		m := entries[i].Message
+		if m.Role == ai.RoleTool && m.ToolCallID == callID {
+			found = m.Content
 			ok = true
 			break
 		}

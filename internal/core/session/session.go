@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -97,8 +98,6 @@ func NewSessionTree(sessionID string, store storage.Storage) (*SessionTree, erro
 				if se.Timestamp.IsZero() {
 					se.Timestamp = e.CreatedAt
 				}
-				st.entries[se.ID] = &se
-				lastID = se.ID
 			} else {
 				// 兜底反序列化
 				se = SessionEntry{
@@ -107,9 +106,19 @@ func NewSessionTree(sessionID string, store storage.Storage) (*SessionTree, erro
 					Timestamp: e.CreatedAt,
 					Type:      EntryType(e.Type),
 				}
-				st.entries[se.ID] = &se
-				lastID = se.ID
 			}
+			// 历史断链自愈：若存储中存在指向缺失父节点的孤立节点，自动桥接到前序有效节点，避免历史被截断。
+			if se.ParentID != "" && st.entries[se.ParentID] == nil && lastID != "" {
+				slog.Warn("repaired dangling session entry parent link",
+					"session_id", sessionID,
+					"entry_id", se.ID,
+					"missing_parent_id", se.ParentID,
+					"bridged_parent_id", lastID,
+				)
+				se.ParentID = lastID
+			}
+			st.entries[se.ID] = &se
+			lastID = se.ID
 		}
 		st.activeLeafID = lastID
 		return st, nil
@@ -180,20 +189,65 @@ func (s *SessionTree) AppendCompaction(summary string, kept []ai.Message) *Sessi
 	})
 }
 
+func sanitizeMessageToolCalls(m *ai.Message) {
+	if m == nil || len(m.ToolCalls) == 0 {
+		return
+	}
+	sanitized := slices.Clone(m.ToolCalls)
+	changed := false
+	for i := range sanitized {
+		raw := sanitized[i].Function.Arguments
+		if len(raw) == 0 {
+			sanitized[i].Function.Arguments = json.RawMessage("{}")
+			changed = true
+			continue
+		}
+		if !json.Valid(raw) {
+			wrapped, _ := json.Marshal(map[string]string{"_raw": string(raw)})
+			sanitized[i].Function.Arguments = wrapped
+			changed = true
+		}
+	}
+	if changed {
+		m.ToolCalls = sanitized
+	}
+}
+
+func sanitizeEntryForJSON(entry *SessionEntry) {
+	if entry == nil {
+		return
+	}
+	sanitizeMessageToolCalls(entry.Message)
+	for i := range entry.KeptMessages {
+		sanitizeMessageToolCalls(&entry.KeptMessages[i])
+	}
+}
+
 func (s *SessionTree) appendEntryLocked(entry *SessionEntry) *SessionEntry {
 	entryID := fmt.Sprintf("entry_%d_%d", time.Now().UnixNano(), entrySeq.Add(1))
 	now := time.Now()
 	entry.ID = entryID
 	entry.ParentID = s.activeLeafID
 	entry.Timestamp = now
-
-	s.entries[entryID] = entry
-	s.activeLeafID = entryID
+	sanitizeEntryForJSON(entry)
 
 	if s.store != nil {
 		payload, err := json.Marshal(entry)
-		if err == nil {
-			_ = s.store.Commit(context.Background(), func(tx storage.Transaction) error {
+		if err != nil {
+			slog.Error("failed to marshal session entry; skipping activeLeaf advance",
+				"session_id", s.sessionID,
+				"entry_id", entryID,
+				"err", err,
+			)
+			return entry
+		}
+		var commitErr error
+		backoffs := []time.Duration{0, 15 * time.Millisecond, 45 * time.Millisecond}
+		for _, wait := range backoffs {
+			if wait > 0 {
+				time.Sleep(wait)
+			}
+			commitErr = s.store.Commit(context.Background(), func(tx storage.Transaction) error {
 				return tx.AppendEntry(&storage.Entry{
 					ID:        entryID,
 					SessionID: s.sessionID,
@@ -203,14 +257,35 @@ func (s *SessionTree) appendEntryLocked(entry *SessionEntry) *SessionEntry {
 					CreatedAt: now,
 				})
 			})
+			if commitErr == nil {
+				break
+			}
+		}
+		if commitErr != nil {
+			slog.Error("failed to persist session entry; keeping previous activeLeaf",
+				"session_id", s.sessionID,
+				"entry_id", entryID,
+				"parent_id", entry.ParentID,
+				"err", commitErr,
+			)
+			return entry
 		}
 	}
 
+	s.entries[entryID] = entry
+	s.activeLeafID = entryID
 	return entry
 }
 
 // GetLinearContext 根据当前活跃叶子自底向上回溯，遇到最近压缩锚点即截断拼装发给大模型的线性历史
 func (s *SessionTree) GetLinearContext() []ai.Message {
+	msgs, _ := s.GetLinearContextWithOffset()
+	return msgs
+}
+
+// GetLinearContextWithOffset 返回线性上下文及最近压缩锚点之前被截断的累计历史消息偏移量，
+// 用于在 Compaction 之后仍保持单调递增的 Epoch 步长边界与折叠统计。
+func (s *SessionTree) GetLinearContextWithOffset() ([]ai.Message, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -237,11 +312,26 @@ func (s *SessionTree) GetLinearContext() []ai.Message {
 	slices.Reverse(tailAfterCompaction)
 
 	if anchor == nil {
-		return tailAfterCompaction
+		return tailAfterCompaction, 0
+	}
+
+	totalBeforeAnchor := 0
+	walkID := anchor.ParentID
+	for walkID != "" {
+		entry, exists := s.entries[walkID]
+		if !exists {
+			break
+		}
+		if entry.Type == EntryMessage && entry.Message != nil {
+			totalBeforeAnchor++
+		}
+		walkID = entry.ParentID
 	}
 
 	var out []ai.Message
+	hasSummary := false
 	if trimmed := strings.TrimSpace(anchor.Summary); trimmed != "" {
+		hasSummary = true
 		out = append(out, ai.Message{
 			Role:    ai.RoleUser,
 			Content: "<compacted_context>\n" + trimmed + "\n</compacted_context>",
@@ -249,6 +339,117 @@ func (s *SessionTree) GetLinearContext() []ai.Message {
 	}
 	if len(anchor.KeptMessages) > 0 {
 		out = append(out, anchor.KeptMessages...)
+	}
+	out = append(out, tailAfterCompaction...)
+
+	priorOffset := totalBeforeAnchor - len(anchor.KeptMessages)
+	if hasSummary {
+		priorOffset--
+	}
+	if priorOffset < 0 {
+		priorOffset = 0
+	}
+	return out, priorOffset
+}
+
+// LinearEntry 将线性上下文中的消息与其原始 SessionEntry.ID 绑定，支持溯源回查。
+type LinearEntry struct {
+	EntryID string
+	Message ai.Message
+}
+
+// GetEntry 按 entry_id 只读检索会话树中的原始节点（包括压缩锚点之前的历史条目）。
+func (s *SessionTree) GetEntry(entryID string) (*SessionEntry, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	e, ok := s.entries[entryID]
+	if !ok || e == nil {
+		return nil, false
+	}
+	cp := *e
+	if e.Message != nil {
+		m := *e.Message
+		cp.Message = &m
+	}
+	if len(e.KeptMessages) > 0 {
+		cp.KeptMessages = slices.Clone(e.KeptMessages)
+	}
+	return &cp, true
+}
+
+// GetBranchEntries 按时间顺序返回当前活跃分支从根节点到叶子节点的全部 EntryMessage（无损 L0 仓库，不被压缩锚点截断）。
+func (s *SessionTree) GetBranchEntries() []LinearEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []LinearEntry
+	currID := s.activeLeafID
+	for currID != "" {
+		entry, exists := s.entries[currID]
+		if !exists {
+			break
+		}
+		if entry.Type == EntryMessage && entry.Message != nil {
+			out = append(out, LinearEntry{
+				EntryID: entry.ID,
+				Message: *entry.Message,
+			})
+		}
+		currID = entry.ParentID
+	}
+	slices.Reverse(out)
+	return out
+}
+
+// GetLinearEntries 返回带 EntryID 指针的当前有效线性上下文（与 GetLinearContext 保持相同锚点截断语义）。
+func (s *SessionTree) GetLinearEntries() []LinearEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var tailAfterCompaction []LinearEntry
+	var anchor *SessionEntry
+	currID := s.activeLeafID
+
+	for currID != "" {
+		entry, exists := s.entries[currID]
+		if !exists {
+			break
+		}
+		if entry.Type == EntryCompaction {
+			anchor = entry
+			break
+		}
+		if entry.Type == EntryMessage && entry.Message != nil {
+			tailAfterCompaction = append(tailAfterCompaction, LinearEntry{
+				EntryID: entry.ID,
+				Message: *entry.Message,
+			})
+		}
+		currID = entry.ParentID
+	}
+
+	slices.Reverse(tailAfterCompaction)
+
+	if anchor == nil {
+		return tailAfterCompaction
+	}
+
+	var out []LinearEntry
+	if trimmed := strings.TrimSpace(anchor.Summary); trimmed != "" {
+		out = append(out, LinearEntry{
+			EntryID: anchor.ID,
+			Message: ai.Message{
+				Role:    ai.RoleUser,
+				Content: "<compacted_context>\n" + trimmed + "\n</compacted_context>",
+			},
+		})
+	}
+	for _, m := range anchor.KeptMessages {
+		out = append(out, LinearEntry{
+			EntryID: anchor.ID,
+			Message: m,
+		})
 	}
 	out = append(out, tailAfterCompaction...)
 	return out

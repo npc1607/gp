@@ -69,17 +69,18 @@ func TestSqliteStorage_TC_STOR_01_InitAndWAL(t *testing.T) {
 		t.Fatalf("%s(path=%q): PRAGMA busy_timeout got %d, want %d", fn, dbPath, got, want)
 	}
 
-	// 3. tables: entries, documents, task_checkpoints
-	requiredTables := []string{"entries", "documents", "task_checkpoints"}
+	// 3. tables: entries, documents, task_checkpoints, context_metrics
+	requiredTables := []string{"entries", "documents", "task_checkpoints", "context_metrics"}
 	for _, table := range requiredTables {
 		checkSqliteObjectExists(t, store.db, "table", table)
 	}
 
-	// 4. indexes: idx_entries_session, idx_task_checkpoints_status, idx_task_checkpoints_session
+	// 4. indexes: idx_entries_session, idx_task_checkpoints_status, idx_task_checkpoints_session, idx_context_metrics_session
 	requiredIndexes := []string{
 		"idx_entries_session",
 		"idx_task_checkpoints_status",
 		"idx_task_checkpoints_session",
+		"idx_context_metrics_session",
 	}
 	for _, idx := range requiredIndexes {
 		checkSqliteObjectExists(t, store.db, "index", idx)
@@ -411,5 +412,90 @@ func TestSqliteStorage_CRUDAndUpsert(t *testing.T) {
 	unfinishedAfter, err := store.ListUnfinishedCheckpoints()
 	if err != nil || len(unfinishedAfter) != 0 {
 		t.Fatalf("%s.ListUnfinishedCheckpoints(after): got len %d err %v, want len 0 err nil", fn, len(unfinishedAfter), err)
+	}
+}
+
+func TestSqliteStorage_ContextMetricsCRUDAndTotals(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	for i := 1; i <= 7; i++ {
+		m := &storage.ContextMetric{
+			SessionID:        "sess_a",
+			ChannelID:        "feishu:oc_123",
+			TurnIndex:        i,
+			StrategyMode:     "e4a_pr1",
+			EpochID:          i / 4,
+			EpochMaskedCount: i * 2,
+			LedgerVersion:    1,
+			LedgerActiveCnt:  2,
+			LedgerSuperseded: 1,
+			LedgerHash:       "deadbeef",
+			ContextBuildMs:   1.25 + float64(i)*0.1,
+			InputTokens:      int64(1000 + i*100),
+			CacheReadTokens:  int64(800 + i*50),
+			CacheWriteTokens: 100,
+			OutputTokens:     int64(40 + i),
+			RecallCalls:      i % 2,
+			RestoreCalls:     i % 3,
+		}
+		if err := store.RecordContextMetric(ctx, m); err != nil {
+			t.Fatalf("RecordContextMetric(turn=%d) error = %v", i, err)
+		}
+		if m.ID == 0 {
+			t.Fatalf("expected non-zero inserted ID for turn %d", i)
+		}
+	}
+
+	// Other session should remain isolated
+	if err := store.RecordContextMetric(ctx, &storage.ContextMetric{
+		SessionID:    "sess_b",
+		TurnIndex:    1,
+		StrategyMode: "e4a_pr1",
+		RecallCalls:  9,
+	}); err != nil {
+		t.Fatalf("RecordContextMetric(sess_b) error = %v", err)
+	}
+
+	recent, err := store.ListContextMetrics("sess_a", 5)
+	if err != nil {
+		t.Fatalf("ListContextMetrics error = %v", err)
+	}
+	if len(recent) != 5 {
+		t.Fatalf("expected 5 recent metrics, got %d", len(recent))
+	}
+	if recent[0].TurnIndex != 7 || recent[4].TurnIndex != 3 {
+		t.Fatalf("expected newest-first order [7..3], got first=%d last=%d", recent[0].TurnIndex, recent[4].TurnIndex)
+	}
+	if recent[0].ChannelID != "feishu:oc_123" || recent[0].LedgerHash != "deadbeef" {
+		t.Fatalf("unexpected fields in recent[0]: %+v", recent[0])
+	}
+
+	totals, err := store.GetContextMetricTotals("sess_a")
+	if err != nil {
+		t.Fatalf("GetContextMetricTotals error = %v", err)
+	}
+	// i=1..7: recall i%2 -> 1,0,1,0,1,0,1 = 4; restore i%3 -> 1,2,0,1,2,0,1 = 7
+	if totals.TurnCount != 7 || totals.TotalRecallCalls != 4 || totals.TotalRestoreCalls != 7 {
+		t.Fatalf("unexpected totals: %+v, want TurnCount=7 Recall=4 Restore=7", totals)
+	}
+
+	if err := store.DeleteSession("sess_a"); err != nil {
+		t.Fatalf("DeleteSession error = %v", err)
+	}
+	afterDel, err := store.ListContextMetrics("sess_a", 5)
+	if err != nil {
+		t.Fatalf("ListContextMetrics after delete error = %v", err)
+	}
+	if len(afterDel) != 0 {
+		t.Fatalf("expected sess_a metrics deleted, got %d rows", len(afterDel))
+	}
+	totalsB, err := store.GetContextMetricTotals("sess_b")
+	if err != nil || totalsB.TurnCount != 1 || totalsB.TotalRecallCalls != 9 {
+		t.Fatalf("expected sess_b untouched, got %+v err=%v", totalsB, err)
 	}
 }

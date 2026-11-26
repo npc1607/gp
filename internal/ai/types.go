@@ -56,6 +56,7 @@ type Message struct {
 	Images            []ImagePart `json:"images,omitempty"`
 	ToolCalls         []ToolCall  `json:"tool_calls,omitempty"`
 	ToolCallID        string      `json:"tool_call_id,omitempty"` // 当 Role == RoleTool 时关联的调用 ID
+	CacheControl      bool        `json:"cache_control,omitempty"` // 为支持的 Provider (如 Anthropic) 声明 ephemeral 提示词缓存断点
 	Timestamp         time.Time   `json:"timestamp"`
 }
 
@@ -68,6 +69,7 @@ type messageAux struct {
 	ReasoningContent  string      `json:"reasoning_content,omitempty"`
 	ToolCalls         []ToolCall  `json:"tool_calls,omitempty"`
 	ToolCallID        string      `json:"tool_call_id,omitempty"`
+	CacheControl      bool        `json:"cache_control,omitempty"`
 	Timestamp         time.Time   `json:"timestamp"`
 }
 
@@ -90,6 +92,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.Images = aux.Images
 	m.ToolCalls = aux.ToolCalls
 	m.ToolCallID = aux.ToolCallID
+	m.CacheControl = aux.CacheControl
 	m.Timestamp = aux.Timestamp
 	return nil
 }

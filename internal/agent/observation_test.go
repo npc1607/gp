@@ -156,3 +156,40 @@ func (d *dummyReplayTool) ReplayMode() tools.ReplayMode { return d.mode }
 func (d *dummyReplayTool) Execute(_ *tools.ToolContext, _ json.RawMessage) (*tools.ToolResult, error) {
 	return &tools.ToolResult{Content: "ok"}, nil
 }
+
+func TestEpochObservationMasking_FreezesWithinEpoch(t *testing.T) {
+	large := strings.Repeat("verbose line payload\n", 25)
+	var msgs []ai.Message
+	for turn := 0; turn < 15; turn++ {
+		cid := fmt.Sprintf("c_%02d", turn)
+		msgs = append(msgs,
+			ai.Message{
+				Role: ai.RoleAssistant,
+				ToolCalls: []ai.ToolCall{{
+					ID:       cid,
+					Type:     "function",
+					Function: ai.FunctionCall{Name: "bash", Arguments: json.RawMessage(`{}`)},
+				}},
+			},
+			ai.Message{Role: ai.RoleTool, ToolCallID: cid, Content: fmt.Sprintf("t=%d\n%s", turn, large)},
+		)
+	}
+
+	// Compare turn 13 (26 msgs, recentCutoff=16) vs turn 14 (28 msgs, recentCutoff=18) vs turn 15 (30 msgs, recentCutoff=20)
+	// All stay at freezeBoundary=16, preserving 100% prefix match!
+	m13 := applyEpochObservationMasking(msgs[:26], 16, 5)
+	m14 := applyEpochObservationMasking(msgs[:28], 16, 5)
+	m15 := applyEpochObservationMasking(msgs[:30], 16, 5)
+
+	for i := 0; i < len(m13); i++ {
+		if m13[i].Content != m14[i].Content || m13[i].Content != m15[i].Content {
+			t.Fatalf("expected frozen prefix at msg %d across epoch 1, got diffs", i)
+		}
+	}
+	// Recent 5 tool outputs (turns 10..14) must remain unmasked in m15.
+	for _, idx := range []int{21, 23, 25, 27, 29} {
+		if strings.Contains(m15[idx].Content, "[已折叠历史工具输出") {
+			t.Fatalf("expected recent tool msg %d to remain unmasked", idx)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,28 +77,40 @@ type AgentInstance struct {
 	taskTree             *task.OwnershipTree
 	systemPrompt         string
 	thinkingLevel        string
-	contextWindow         int64
-	autoCompactThreshold  float64
-	observationMaskWindow int
+	contextWindow          int64
+	autoCompactThreshold   float64
+	observationMaskWindow  int
+	observationMaskEpoch   int
+	channelID              string
+	contextLedger          *compaction.ContextLedger
+	lastPersistedLedgerVer int
 }
 
 func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *tools.Registry) *AgentInstance {
 	initialStatus := StatusIdle
 	a := &AgentInstance{
-		id:                    id,
-		roleName:              roleName,
-		sessionTree:           session.NewInMemorySession(id),
-		toolReg:               reg,
-		provider:              provider,
-		modelName:             modelName,
-		maxTurns:              500,
-		contextWindow:         compaction.ResolveContextWindow(modelName),
-		autoCompactThreshold:  0.80,
-		observationMaskWindow: defaultObservationMaskWindow,
+		id:                     id,
+		roleName:               roleName,
+		sessionTree:            session.NewInMemorySession(id),
+		toolReg:                reg,
+		provider:               provider,
+		modelName:              modelName,
+		maxTurns:               500,
+		contextWindow:          compaction.ResolveContextWindow(modelName),
+		autoCompactThreshold:   0.80,
+		observationMaskWindow:  defaultObservationMaskWindow,
+		observationMaskEpoch:   defaultObservationMaskEpoch,
+		contextLedger:          compaction.NewContextLedger(),
+		lastPersistedLedgerVer: -1,
 	}
 	if reg != nil && len(reg.List()) > 0 {
-		if _, exists := reg.Get("restore_observation"); !exists {
-			_ = reg.Register(&restoreObservationTool{agent: a})
+		for _, rt := range []tools.Tool{
+			&restoreObservationTool{agent: a},
+			&recallEntriesTool{agent: a},
+		} {
+			if _, exists := reg.Get(rt.Name()); !exists {
+				_ = reg.Register(rt)
+			}
 		}
 	}
 	a.status.Store(&initialStatus)
@@ -173,6 +186,20 @@ func (a *AgentInstance) SetCwd(cwd string) {
 	a.cwd = cwd
 }
 
+// SetChannelID 设置当前 Agent 所属渠道标识（如 feishu chat_id / cli / rpc），用于可观测性指标落盘。
+func (a *AgentInstance) SetChannelID(channelID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.channelID = strings.TrimSpace(channelID)
+}
+
+// GetChannelID 返回当前 Agent 所属渠道标识。
+func (a *AgentInstance) GetChannelID() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.channelID
+}
+
 func (a *AgentInstance) GetCwd() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -226,11 +253,12 @@ func (a *AgentInstance) EmitEvent(ev AgentEvent) {
 
 func (a *AgentInstance) SetStorage(s storage.Storage) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.store = s
 	if s != nil && a.taskTree == nil {
 		a.taskTree = task.NewOwnershipTree(s)
 	}
+	a.mu.Unlock()
+	a.loadPersistedContextLedger()
 }
 
 func (a *AgentInstance) GetStorage() storage.Storage {
@@ -265,8 +293,25 @@ func (a *AgentInstance) GetSystemPrompt() string {
 
 func (a *AgentInstance) SetSessionTree(st *session.SessionTree) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.sessionTree = st
+	a.contextLedger = compaction.NewContextLedger()
+	a.lastPersistedLedgerVer = -1
+	a.mu.Unlock()
+	a.loadPersistedContextLedger()
+}
+
+// GetContextLedger 返回当前会话 L1 ContextLedger 的只读拷贝。
+func (a *AgentInstance) GetContextLedger() *compaction.ContextLedger {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.contextLedger.Clone()
+}
+
+// SetContextLedger 显式覆盖当前会话的 L1 ContextLedger。
+func (a *AgentInstance) SetContextLedger(l *compaction.ContextLedger) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.contextLedger = l.Clone()
 }
 
 // Prompt 驱动 Agent 执行一轮任务，依托 ReAct 状态循环推进

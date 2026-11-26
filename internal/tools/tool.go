@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -103,9 +104,14 @@ func (r *Registry) Get(name string) (Tool, bool) {
 func (r *Registry) List() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	res := make([]Tool, 0, len(r.tools))
-	for _, t := range r.tools {
-		res = append(res, t)
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	res := make([]Tool, 0, len(names))
+	for _, name := range names {
+		res = append(res, r.tools[name])
 	}
 	return res
 }

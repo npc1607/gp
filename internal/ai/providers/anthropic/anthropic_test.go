@@ -294,14 +294,19 @@ func TestProvider_BuildRequest_ToolSchemaAndMerging(t *testing.T) {
 	if built.System != "sys-a\n\nsys-b" {
 		t.Fatalf("system: got %q, want hoisted system prompt", built.System)
 	}
-	if len(built.Messages) != 2 {
-		t.Fatalf("messages: got %d, want 2 (user merged, tool results merged)", len(built.Messages))
+	// Anthropic requires alternating user/assistant turns and places tool_result blocks first within a user turn,
+	// so consecutive RoleUser and RoleTool messages merge into a single "user" message with tool_result blocks first.
+	if len(built.Messages) != 1 {
+		t.Fatalf("messages: got %d, want 1 (consecutive user and tool_result merged into single user turn)", len(built.Messages))
 	}
-	if built.Messages[0].Role != "user" || len(built.Messages[0].Content) != 2 {
-		t.Fatalf("first turn: got %+v, want merged user text blocks", built.Messages[0])
+	if built.Messages[0].Role != "user" || len(built.Messages[0].Content) != 4 {
+		t.Fatalf("merged turn: got %+v, want 1 user message with 4 blocks", built.Messages[0])
 	}
-	if built.Messages[1].Role != "user" || len(built.Messages[1].Content) != 2 {
-		t.Fatalf("second turn: got %+v, want merged tool_result blocks", built.Messages[1])
+	if built.Messages[0].Content[0]["type"] != "tool_result" || built.Messages[0].Content[1]["type"] != "tool_result" {
+		t.Fatalf("expected tool_result blocks placed first, got %+v", built.Messages[0].Content)
+	}
+	if built.Messages[0].Content[2]["type"] != "text" || built.Messages[0].Content[3]["type"] != "text" {
+		t.Fatalf("expected user text blocks after tool_result blocks, got %+v", built.Messages[0].Content)
 	}
 	if len(built.Tools) != 1 {
 		t.Fatalf("tools: got %d, want 1", len(built.Tools))
@@ -414,5 +419,34 @@ func TestProvider_PluginRegistered(t *testing.T) {
 	}
 	if got := ai.InferPluginByModel("claude-opus-4-1"); got != "anthropic" {
 		t.Fatalf("InferPluginByModel(claude-opus-4-1): got %q, want anthropic", got)
+	}
+}
+
+func TestProvider_BuildRequest_CacheControlBreakpoints(t *testing.T) {
+	p := NewProvider("k", "")
+	req := &ai.ChatRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []ai.Message{
+			{Role: ai.RoleSystem, Content: "stable system", CacheControl: true},
+			{Role: ai.RoleUser, Content: "[CONTEXT_LEDGER]\n- rule 1", CacheControl: true},
+			{Role: ai.RoleUser, Content: "current query"},
+		},
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"type":"function","function":{"name":"read","description":"read","parameters":{"type":"object"}}}`),
+			json.RawMessage(`{"type":"function","function":{"name":"recall_entries","description":"recall","parameters":{"type":"object"}}}`),
+		},
+	}
+
+	payload, err := json.Marshal(p.buildRequest(req))
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	got := string(payload)
+	if !strings.Contains(got, `"system":[{"cache_control":{"type":"ephemeral"},"text":"stable system","type":"text"}]`) {
+		t.Fatalf("expected system block with cache_control ephemeral, got: %s", got)
+	}
+	// Expect 3 cache_control breakpoints: System + last Tool + ContextLedger message
+	if count := strings.Count(got, `"cache_control":{"type":"ephemeral"}`); count != 3 {
+		t.Fatalf("expected 3 cache_control ephemeral breakpoints (system + tools + ledger), got %d in %s", count, got)
 	}
 }

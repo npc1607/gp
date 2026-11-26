@@ -157,7 +157,7 @@ func (p *Provider) post(ctx context.Context, payload []byte) (*http.Response, er
 type anthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
-	System      string             `json:"system,omitempty"`
+	System      any                `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Tools       []anthropicTool    `json:"tools,omitempty"`
 	Temperature *float32           `json:"temperature,omitempty"`
@@ -170,10 +170,15 @@ type anthropicMessage struct {
 	Content []map[string]any `json:"content"`
 }
 
+type cacheControl struct {
+	Type string `json:"type"`
+}
+
 type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
 type thinkingConfig struct {
@@ -214,9 +219,10 @@ func (p *Provider) buildRequest(req *ai.ChatRequest) *anthropicRequest {
 	}
 }
 
-// buildMessages 将统一消息模型转换为 Anthropic 的 system 字符串 + 交替消息序列
-func (p *Provider) buildMessages(req *ai.ChatRequest) (string, []anthropicMessage) {
+// buildMessages 将统一消息模型转换为 Anthropic 的 system 载荷 + 交替消息序列
+func (p *Provider) buildMessages(req *ai.ChatRequest) (any, []anthropicMessage) {
 	var systemParts []string
+	systemCache := false
 	messages := make([]anthropicMessage, 0, len(req.Messages))
 
 	for _, msg := range req.Messages {
@@ -224,6 +230,9 @@ func (p *Provider) buildMessages(req *ai.ChatRequest) (string, []anthropicMessag
 		case ai.RoleSystem:
 			if strings.TrimSpace(msg.Content) != "" {
 				systemParts = append(systemParts, msg.Content)
+				if msg.CacheControl {
+					systemCache = true
+				}
 			}
 		case ai.RoleTool:
 			toolContent := []map[string]any{{
@@ -240,13 +249,20 @@ func (p *Provider) buildMessages(req *ai.ChatRequest) (string, []anthropicMessag
 					},
 				})
 			}
-			appendBlocks(&messages, "user", []map[string]any{{
+			blk := map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": msg.ToolCallID,
 				"content":     toolContent,
-			}})
+			}
+			if msg.CacheControl {
+				blk["cache_control"] = map[string]string{"type": "ephemeral"}
+			}
+			appendBlocks(&messages, "user", []map[string]any{blk})
 		case ai.RoleAssistant:
 			if blocks := p.assistantBlocks(msg); len(blocks) > 0 {
+				if msg.CacheControl {
+					blocks[len(blocks)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+				}
 				appendBlocks(&messages, "assistant", blocks)
 			}
 		default:
@@ -270,11 +286,25 @@ func (p *Provider) buildMessages(req *ai.ChatRequest) (string, []anthropicMessag
 					},
 				})
 			}
+			if msg.CacheControl && len(userBlocks) > 0 {
+				userBlocks[len(userBlocks)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+			}
 			appendBlocks(&messages, "user", userBlocks)
 		}
 	}
 
-	return strings.Join(systemParts, "\n\n"), messages
+	joinedSys := strings.Join(systemParts, "\n\n")
+	if joinedSys == "" {
+		return nil, messages
+	}
+	if systemCache {
+		return []map[string]any{{
+			"type":          "text",
+			"text":          joinedSys,
+			"cache_control": map[string]string{"type": "ephemeral"},
+		}}, messages
+	}
+	return joinedSys, messages
 }
 
 // assistantBlocks 将助手历史消息还原为内容块（thinking / text / tool_use）
@@ -381,6 +411,9 @@ func convertTools(tools []json.RawMessage) []anthropicTool {
 			tool.InputSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
 		out = append(out, tool)
+	}
+	if len(out) > 0 {
+		out[len(out)-1].CacheControl = &cacheControl{Type: "ephemeral"}
 	}
 	return out
 }

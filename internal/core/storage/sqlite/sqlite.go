@@ -103,6 +103,29 @@ func (s *SqliteStorage) initSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_task_checkpoints_status ON task_checkpoints(status);
 	CREATE INDEX IF NOT EXISTS idx_task_checkpoints_session ON task_checkpoints(session_id);
+
+	CREATE TABLE IF NOT EXISTS context_metrics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL,
+		channel_id TEXT NOT NULL DEFAULT '',
+		turn_index INTEGER NOT NULL,
+		strategy_mode TEXT NOT NULL,
+		epoch_id INTEGER NOT NULL,
+		epoch_masked_count INTEGER NOT NULL,
+		ledger_version INTEGER NOT NULL,
+		ledger_active_cnt INTEGER NOT NULL,
+		ledger_superseded INTEGER NOT NULL,
+		ledger_hash TEXT NOT NULL,
+		context_build_ms REAL NOT NULL,
+		input_tokens INTEGER NOT NULL,
+		cache_read_tokens INTEGER NOT NULL,
+		cache_write_tokens INTEGER NOT NULL,
+		output_tokens INTEGER NOT NULL,
+		recall_calls INTEGER NOT NULL,
+		restore_calls INTEGER NOT NULL,
+		created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_context_metrics_session ON context_metrics(session_id, id);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -471,10 +494,117 @@ func (s *SqliteStorage) DeleteSession(sessionID string) error {
 		`DELETE FROM entries WHERE session_id = ?`,
 		`DELETE FROM documents WHERE session_id = ?`,
 		`DELETE FROM task_checkpoints WHERE session_id = ?`,
+		`DELETE FROM context_metrics WHERE session_id = ?`,
 	} {
 		if _, err := tx.Exec(q, sessionID); err != nil {
 			return fmt.Errorf("delete session %q: %w", sessionID, err)
 		}
 	}
 	return tx.Commit()
+}
+
+// RecordContextMetric 写入单轮上下文组装与缓存指标至 SQLite context_metrics 表
+func (s *SqliteStorage) RecordContextMetric(ctx context.Context, m *storage.ContextMetric) error {
+	if s.isClosed() {
+		return fmt.Errorf("storage closed")
+	}
+	if m == nil || m.SessionID == "" {
+		return fmt.Errorf("context metric SessionID cannot be empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	createdAt := m.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO context_metrics (
+			session_id, channel_id, turn_index, strategy_mode, epoch_id, epoch_masked_count,
+			ledger_version, ledger_active_cnt, ledger_superseded, ledger_hash,
+			context_build_ms, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+			recall_calls, restore_calls, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.SessionID, m.ChannelID, m.TurnIndex, m.StrategyMode, m.EpochID, m.EpochMaskedCount,
+		m.LedgerVersion, m.LedgerActiveCnt, m.LedgerSuperseded, m.LedgerHash,
+		m.ContextBuildMs, m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens, m.OutputTokens,
+		m.RecallCalls, m.RestoreCalls, createdAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert context_metric failed: %w", err)
+	}
+	if id, idErr := res.LastInsertId(); idErr == nil {
+		m.ID = id
+	}
+	m.CreatedAt = createdAt
+	return nil
+}
+
+// ListContextMetrics 按最近插入倒序查询指定会话的上下文指标（limit <= 0 时默认返回最近 50 条）
+func (s *SqliteStorage) ListContextMetrics(sessionID string, limit int) ([]storage.ContextMetric, error) {
+	if s.isClosed() {
+		return nil, fmt.Errorf("storage closed")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT id, session_id, channel_id, turn_index, strategy_mode, epoch_id, epoch_masked_count,
+			ledger_version, ledger_active_cnt, ledger_superseded, ledger_hash,
+			context_build_ms, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+			recall_calls, restore_calls, created_at
+		FROM context_metrics
+		WHERE session_id = ?
+		ORDER BY id DESC
+		LIMIT ?`,
+		sessionID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query context_metrics failed: %w", err)
+	}
+	defer rows.Close()
+
+	var out []storage.ContextMetric
+	for rows.Next() {
+		var (
+			item      storage.ContextMetric
+			createdAt string
+		)
+		if err := rows.Scan(
+			&item.ID, &item.SessionID, &item.ChannelID, &item.TurnIndex, &item.StrategyMode,
+			&item.EpochID, &item.EpochMaskedCount, &item.LedgerVersion, &item.LedgerActiveCnt,
+			&item.LedgerSuperseded, &item.LedgerHash, &item.ContextBuildMs, &item.InputTokens,
+			&item.CacheReadTokens, &item.CacheWriteTokens, &item.OutputTokens,
+			&item.RecallCalls, &item.RestoreCalls, &createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan context_metric failed: %w", err)
+		}
+		if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
+			item.CreatedAt = t
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// GetContextMetricTotals 汇总指定会话的累计轮次与 recall_entries / restore_observation 调用次数
+func (s *SqliteStorage) GetContextMetricTotals(sessionID string) (storage.ContextMetricTotals, error) {
+	if s.isClosed() {
+		return storage.ContextMetricTotals{}, fmt.Errorf("storage closed")
+	}
+	var totals storage.ContextMetricTotals
+	err := s.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(recall_calls), 0), COALESCE(SUM(restore_calls), 0)
+		FROM context_metrics
+		WHERE session_id = ?`,
+		sessionID,
+	).Scan(&totals.TurnCount, &totals.TotalRecallCalls, &totals.TotalRestoreCalls)
+	if err != nil {
+		return storage.ContextMetricTotals{}, fmt.Errorf("query context_metrics totals failed: %w", err)
+	}
+	return totals, nil
 }
