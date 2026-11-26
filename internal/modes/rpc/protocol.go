@@ -9,10 +9,13 @@ type (
 	RunOptions      = agp.RunOptions
 	ExecutionPolicy = agp.ExecutionPolicy
 	CapabilityRule  = agp.CapabilityRule
-	SessionSummary  = agp.SessionSummary
-	CallerContext   = agp.CallerContext
-	Usage           = agp.Usage
-	Event           = agp.Event
+	SessionSummary           = agp.SessionSummary
+	ContextConstraintSummary = agp.ContextConstraintSummary
+	ContextTurnMetric        = agp.ContextTurnMetric
+	ContextStats             = agp.ContextStats
+	CallerContext            = agp.CallerContext
+	Usage                    = agp.Usage
+	Event                    = agp.Event
 )
 
 const (
@@ -26,6 +29,7 @@ const (
 	OpListSessions  = agp.OpListSessions
 	OpResumeSession = agp.OpResumeSession
 	OpDeleteSession = agp.OpDeleteSession
+	OpContextStats  = agp.OpContextStats
 )
 
 const (
@@ -40,12 +44,13 @@ const (
 	EventApprovalRequest = agp.EventApprovalRequest
 	EventQuestionRequest = agp.EventQuestionRequest
 	EventDelta           = agp.EventDelta
-	EventFinal         = agp.EventFinal
+	EventFinal           = agp.EventFinal
 	EventResetAck        = agp.EventResetAck
 	EventAbortAck        = agp.EventAbortAck
 	EventSessionsList    = agp.EventSessionsList
 	EventResumeAck       = agp.EventResumeAck
 	EventDeleteAck       = agp.EventDeleteAck
+	EventContextStats    = agp.EventContextStats
 	EventPong            = agp.EventPong
 	EventError           = agp.EventError
 )

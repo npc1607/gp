@@ -121,7 +121,7 @@ func wrapRegistryWithRiskGuard(reg *tools.Registry, guard *riskGuard) *tools.Reg
 func isSensitiveTool(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	switch lower {
-	case "subagent", "ask_peer_agent", "restore_observation", "ask_user_question", "feishu_send_message", "mcp__feishu__feishu_send_message":
+	case "subagent", "ask_peer_agent", "restore_observation", "recall_entries", "ask_user_question", "feishu_send_message", "mcp__feishu__feishu_send_message":
 		return false
 	case "bash", "write", "edit", "read", "grep", "find", "ls", "codemode":
 		return true

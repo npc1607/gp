@@ -21,6 +21,7 @@ import (
 	_ "gp/internal/ai/providers/anthropic"
 	"gp/internal/ai/providers/openai"
 	"gp/internal/core/auth"
+	"gp/internal/core/compaction"
 	"gp/internal/core/resources"
 	"gp/internal/core/session"
 	"gp/internal/core/settings"
@@ -61,6 +62,7 @@ type Server struct {
 	ownStore      bool
 	mu            sync.Mutex
 	sessionGen    map[string]string
+	providers     map[string]ai.Provider
 	cancels       map[string]context.CancelFunc
 	approvals     map[string]chan bool
 	approvalSeq   atomic.Uint64
@@ -75,6 +77,7 @@ func NewServer(opts RunnerOptions) *Server {
 	return &Server{
 		opts:          opts,
 		sessionGen:    make(map[string]string),
+		providers:     make(map[string]ai.Provider),
 		cancels:       make(map[string]context.CancelFunc),
 		approvals:     make(map[string]chan bool),
 		questions:     make(map[string]chan questionReply),
@@ -246,11 +249,10 @@ func (s *Server) dispatch(ctx context.Context, emit func(Event), req Request, wg
 	case OpPing:
 		emit(Event{ID: req.ID, Event: EventPong})
 	case OpResetSession:
-		s.mu.Lock()
 		if req.SessionID != "" {
-			s.sessionGen[req.SessionID] = fmt.Sprintf("%s_sess_%s", req.SessionID, newUUIDv4())
+			nextID := fmt.Sprintf("%s_sess_%s", req.SessionID, newUUIDv4())
+			s.setEffectiveSessionID(req.SessionID, nextID)
 		}
-		s.mu.Unlock()
 		emit(Event{ID: req.ID, Event: EventResetAck, SessionID: req.SessionID})
 	case OpListSessions:
 		s.handleListSessions(emit, req)
@@ -258,6 +260,8 @@ func (s *Server) dispatch(ctx context.Context, emit func(Event), req Request, wg
 		s.handleResumeSession(emit, req)
 	case OpDeleteSession:
 		s.handleDeleteSession(emit, req)
+	case OpContextStats:
+		s.handleContextStats(emit, req)
 	case OpAbort:
 		s.mu.Lock()
 		cancel, ok := s.cancels[req.TargetID]
@@ -296,16 +300,53 @@ func newUUIDv4() string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+const rpcActiveSessionNamespace = "__rpc_active_sessions__"
+
+func (s *Server) setEffectiveSessionID(chatID, activeID string) {
+	if chatID == "" || activeID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.sessionGen[chatID] = activeID
+	s.mu.Unlock()
+
+	if store := s.ensureStore(); store != nil {
+		if err := store.Commit(context.Background(), func(tx storage.Transaction) error {
+			return tx.SetDocument(rpcActiveSessionNamespace, chatID, []byte(activeID))
+		}); err != nil {
+			slog.Warn("failed to persist active session mapping", "chat_id", chatID, "active_session_id", activeID, "err", err)
+		}
+	}
+}
+
 func (s *Server) effectiveSessionID(sessionID string) string {
 	if sessionID == "" {
 		return fmt.Sprintf("sess_%s", newUUIDv4())
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cur := s.sessionGen[sessionID]; cur != "" {
+	cur := s.sessionGen[sessionID]
+	s.mu.Unlock()
+	if cur != "" {
 		return cur
 	}
-	return sessionID
+
+	resolved := sessionID
+	if store := s.ensureStore(); store != nil {
+		if raw, ok, err := store.GetDocument(rpcActiveSessionNamespace, sessionID); err == nil && ok {
+			if active := strings.TrimSpace(string(raw)); active != "" && sessionBelongsToChat(sessionID, active) {
+				resolved = active
+			}
+		}
+	}
+
+	s.mu.Lock()
+	if existing := s.sessionGen[sessionID]; existing != "" {
+		resolved = existing
+	} else {
+		s.sessionGen[sessionID] = resolved
+	}
+	s.mu.Unlock()
+	return resolved
 }
 
 func sessionBelongsToChat(chatSessionID, targetID string) bool {
@@ -359,9 +400,7 @@ func (s *Server) handleResumeSession(emit func(Event), req Request) {
 		emit(Event{ID: req.ID, Event: EventError, Code: "INVALID_SESSION", Message: "目标会话不存在或不属于当前群聊"})
 		return
 	}
-	s.mu.Lock()
-	s.sessionGen[req.SessionID] = targetID
-	s.mu.Unlock()
+	s.setEffectiveSessionID(req.SessionID, targetID)
 	emit(Event{ID: req.ID, Event: EventResumeAck, SessionID: targetID})
 }
 
@@ -381,12 +420,133 @@ func (s *Server) handleDeleteSession(emit func(Event), req Request) {
 		emit(Event{ID: req.ID, Event: EventError, Code: "STORAGE_ERROR", Message: err.Error()})
 		return
 	}
-	s.mu.Lock()
-	if cur := s.sessionGen[req.SessionID]; cur == targetID || (cur == "" && targetID == req.SessionID) {
-		s.sessionGen[req.SessionID] = fmt.Sprintf("%s_sess_%s", req.SessionID, newUUIDv4())
+	if cur := s.effectiveSessionID(req.SessionID); cur == targetID {
+		nextID := fmt.Sprintf("%s_sess_%s", req.SessionID, newUUIDv4())
+		s.setEffectiveSessionID(req.SessionID, nextID)
 	}
-	s.mu.Unlock()
 	emit(Event{ID: req.ID, Event: EventDeleteAck, SessionID: targetID})
+}
+
+func resolveChannelID(req Request) string {
+	if req.Metadata != nil {
+		if ch := strings.TrimSpace(req.Metadata["channel_id"]); ch != "" {
+			return ch
+		}
+		if chatID := strings.TrimSpace(req.Metadata["chat_id"]); chatID != "" {
+			return "feishu:" + chatID
+		}
+	}
+	return strings.TrimSpace(req.Client)
+}
+
+func summarizeConstraints(items []*compaction.Constraint, limit int) []ContextConstraintSummary {
+	if len(items) == 0 {
+		return nil
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]ContextConstraintSummary, 0, len(items))
+	for _, c := range items {
+		if c == nil {
+			continue
+		}
+		prov := append([]string(nil), c.Provenance...)
+		out = append(out, ContextConstraintSummary{
+			ID:           c.ID,
+			Category:     c.Category,
+			Statement:    c.Statement,
+			Status:       string(c.Status),
+			SupersededBy: c.SupersededBy,
+			Provenance:   prov,
+		})
+	}
+	return out
+}
+
+// handleContextStats serves read-only ContextLedger, Epoch masking, and per-turn cache metrics
+// directly from storage without invoking an LLM.
+func (s *Server) handleContextStats(emit func(Event), req Request) {
+	store := s.ensureStore()
+	if store == nil {
+		emit(Event{ID: req.ID, Event: EventError, Code: "STORAGE_ERROR", Message: "storage unavailable"})
+		return
+	}
+
+	effSessionID := s.effectiveSessionID(req.SessionID)
+	stats := &ContextStats{
+		SessionID:   effSessionID,
+		EpochStride: agent.DefaultObservationMaskEpoch,
+		MaskWindow:  agent.DefaultObservationMaskWindow,
+	}
+
+	if st, err := session.NewSessionTree(effSessionID, store); err == nil {
+		rawMsgs, priorOffset := st.GetLinearContextWithOffset()
+		stats.MessageCount = len(rawMsgs)
+		stripped := 0
+		window := make([]ai.Message, 0, len(rawMsgs))
+		for _, m := range rawMsgs {
+			if m.Role == ai.RoleSystem {
+				stripped++
+				continue
+			}
+			window = append(window, m)
+		}
+		_, epochID, freezeBoundary, maskedCount, epochPos := agent.ApplyEpochObservationMaskingWithOffset(
+			window, agent.DefaultObservationMaskEpoch, agent.DefaultObservationMaskWindow, priorOffset+stripped,
+		)
+		stats.EpochID = epochID
+		stats.FreezeBoundary = priorOffset + freezeBoundary
+		stats.MaskedCount = maskedCount
+		stats.EpochPosition = epochPos
+	}
+
+	if rawLedger, ok, err := store.GetDocument(effSessionID, "context_ledger"); err == nil && ok && len(rawLedger) > 0 {
+		if ledger, uErr := compaction.UnmarshalContextLedger(rawLedger); uErr == nil {
+			stats.LedgerVersion, stats.LedgerActiveCnt, stats.LedgerSuperseded, stats.LedgerHash = ledger.Stats()
+			stats.ActiveConstraints = summarizeConstraints(ledger.SortedByStatus(compaction.StatusActive), 10)
+			stats.SupersededConstraints = summarizeConstraints(ledger.SortedByStatus(compaction.StatusSuperseded), 10)
+			stats.LedgerResolvedCnt = len(ledger.SortedByStatus(compaction.StatusResolved))
+		}
+	}
+
+	if metricStore, ok := store.(storage.ContextMetricStore); ok {
+		if totals, err := metricStore.GetContextMetricTotals(effSessionID); err == nil {
+			stats.TotalRecallCalls = totals.TotalRecallCalls
+			stats.TotalRestoreCalls = totals.TotalRestoreCalls
+			stats.TotalTurns = totals.TurnCount
+		}
+		if recent, err := metricStore.ListContextMetrics(effSessionID, 5); err == nil {
+			stats.RecentTurns = make([]ContextTurnMetric, 0, len(recent))
+			for _, m := range recent {
+				stats.RecentTurns = append(stats.RecentTurns, ContextTurnMetric{
+					TurnIndex:        m.TurnIndex,
+					StrategyMode:     m.StrategyMode,
+					EpochID:          m.EpochID,
+					EpochMaskedCount: m.EpochMaskedCount,
+					LedgerVersion:    m.LedgerVersion,
+					LedgerActiveCnt:  m.LedgerActiveCnt,
+					LedgerSuperseded: m.LedgerSuperseded,
+					LedgerHash:       m.LedgerHash,
+					ContextBuildMs:   m.ContextBuildMs,
+					InputTokens:      int(m.InputTokens),
+					CacheReadTokens:  int(m.CacheReadTokens),
+					CacheWriteTokens: int(m.CacheWriteTokens),
+					OutputTokens:     int(m.OutputTokens),
+					RecallCalls:      m.RecallCalls,
+					RestoreCalls:     m.RestoreCalls,
+					CreatedAt:        m.CreatedAt.Local().Format("15:04:05"),
+				})
+			}
+		}
+	}
+
+	emit(Event{
+		ID:           req.ID,
+		Event:        EventContextStats,
+		SessionID:    effSessionID,
+		ContextStats: stats,
+	})
 }
 
 func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
@@ -432,12 +592,14 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		homeDir, _ = os.UserHomeDir()
 	}
 
+	effSessionID := s.effectiveSessionID(req.SessionID)
 	modelName := s.resolveModelName(cfg, req.Options)
 	baseURL := s.resolveBaseURL(cfg)
 	apiKey := s.resolveAPIKey(cfg)
 
 	authStore := auth.NewStore(homeDir)
-	if inferred := auth.InferProviderFromModel(modelName); inferred != "" && apiKey == "" {
+	inferred := auth.InferProviderFromModel(modelName)
+	if inferred != "" && apiKey == "" {
 		if k, u, _, ok := authStore.ResolveCredential(inferred); ok {
 			apiKey = k
 			if u != "" {
@@ -448,9 +610,21 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 
 	prov := s.opts.Provider
 	if prov == nil {
-		prov = ai.CreateProviderFromPlugins("", apiKey, baseURL, modelName)
+		provKey := fmt.Sprintf("%s|%s|%s|%s", inferred, effSessionID, apiKey, baseURL)
+		s.mu.Lock()
+		if s.providers == nil {
+			s.providers = make(map[string]ai.Provider)
+		}
+		prov = s.providers[provKey]
+		s.mu.Unlock()
 		if prov == nil {
-			prov = openai.NewProvider(apiKey, baseURL)
+			prov = ai.CreateProviderFromPlugins("", apiKey, baseURL, modelName)
+			if prov == nil {
+				prov = openai.NewProvider(apiKey, baseURL)
+			}
+			s.mu.Lock()
+			s.providers[provKey] = prov
+			s.mu.Unlock()
 		}
 	}
 
@@ -564,6 +738,7 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 
 	ag := agent.NewAgent("agp-rpc", "assistant", prov, modelName, reg)
 	ag.SetCwd(cwd)
+	ag.SetChannelID(resolveChannelID(req))
 
 	resLoader := resources.NewResourceLoader(cwd, homeDir)
 	if cfg != nil {
@@ -575,7 +750,6 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		ag.SetSystemPrompt(sysPrompt)
 	}
 
-	effSessionID := s.effectiveSessionID(req.SessionID)
 	if store := s.ensureStore(); store != nil {
 		st, err := session.NewSessionTree(effSessionID, store)
 		if err != nil {
@@ -606,9 +780,6 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		if chunk.ThinkingDelta != "" {
 			emit(Event{ID: req.ID, Event: EventThinking, Text: chunk.ThinkingDelta})
 		}
-		if chunk.ToolCallDelta != nil && chunk.ToolCallDelta.Function.Name != "" {
-			emit(Event{ID: req.ID, Event: EventToolStart, Tool: chunk.ToolCallDelta.Function.Name})
-		}
 		if chunk.DeltaText != "" {
 			emit(Event{ID: req.ID, Event: EventDelta, Text: chunk.DeltaText})
 		}
@@ -618,6 +789,12 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 	var turnUsage ai.TokenUsage
 	ag.SetEventHandler(func(ev agent.AgentEvent) {
 		switch ev.Type {
+		case agent.EventToolCallStart:
+			emit(Event{
+				ID:   req.ID,
+				Event: EventToolStart,
+				Tool: ev.ToolName,
+			})
 		case agent.EventToolProgress:
 			emit(Event{
 				ID:      req.ID,
@@ -625,6 +802,12 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 				Tool:    ev.ToolName,
 				Text:    ev.Result,
 				Stalled: ev.Stalled,
+			})
+		case agent.EventToolCallEnd:
+			emit(Event{
+				ID:    req.ID,
+				Event: EventToolEnd,
+				Tool:  ev.ToolName,
 			})
 		case agent.EventUsage:
 			if ev.Usage == nil {
@@ -634,6 +817,7 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 			turnUsage.InputTokens += ev.Usage.InputTokens
 			turnUsage.OutputTokens += ev.Usage.OutputTokens
 			turnUsage.CacheReadTokens += ev.Usage.CacheReadTokens
+			turnUsage.CacheWriteTokens += ev.Usage.CacheWriteTokens
 			turnUsage.TotalTokens += ev.Usage.TotalTokens
 			usageMu.Unlock()
 		}
@@ -657,9 +841,10 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 	}
 	if total.InputTokens > 0 || total.OutputTokens > 0 {
 		final.Usage = &Usage{
-			InputTokens:     int(total.InputTokens),
-			OutputTokens:    int(total.OutputTokens),
-			CacheReadTokens: int(total.CacheReadTokens),
+			InputTokens:      int(total.InputTokens),
+			OutputTokens:     int(total.OutputTokens),
+			CacheReadTokens:  int(total.CacheReadTokens),
+			CacheWriteTokens: int(total.CacheWriteTokens),
 		}
 	}
 	emit(final)

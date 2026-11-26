@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,17 +13,35 @@ import (
 	"gp/internal/core/settings"
 )
 
-// slowProvider 模拟一个流式输出耗时约 1.5s 的模型，用于测试运行中断。
+// slowProvider 模拟一个流式输出耗时约 1.5s 的模型，用于测试运行中断与工具调用事件去重。
 type slowProvider struct {
 	chunks int
 	delay  time.Duration
 }
 
 func (m *slowProvider) Name() string { return "slow" }
-func (m *slowProvider) StreamChat(ctx context.Context, _ *ai.ChatRequest) (<-chan ai.StreamChunk, error) {
-	ch := make(chan ai.StreamChunk, m.chunks+1)
+func (m *slowProvider) StreamChat(ctx context.Context, req *ai.ChatRequest) (<-chan ai.StreamChunk, error) {
+	ch := make(chan ai.StreamChunk, m.chunks+2)
 	go func() {
 		defer close(ch)
+		if req != nil {
+			hasToolResult := false
+			for _, msg := range req.Messages {
+				if msg.Role == ai.RoleSystem && strings.Contains(msg.Content, "安全审计子 Agent") {
+					ch <- ai.StreamChunk{DeltaText: `{"risk_level":"low","allow":true,"can_approve":false,"reason":"probe allow"}`}
+					ch <- ai.StreamChunk{FinishReason: "stop"}
+					return
+				}
+				if msg.Role == ai.RoleTool {
+					hasToolResult = true
+				}
+			}
+			if hasToolResult {
+				ch <- ai.StreamChunk{DeltaText: "done"}
+				ch <- ai.StreamChunk{FinishReason: "stop"}
+				return
+			}
+		}
 		for i := 0; i < m.chunks; i++ {
 			select {
 			case <-ctx.Done():

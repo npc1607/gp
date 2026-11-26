@@ -17,6 +17,7 @@ const (
 	OpListSessions  = "list_sessions"
 	OpResumeSession = "resume_session"
 	OpDeleteSession = "delete_session"
+	OpContextStats  = "ctx_stat"
 )
 
 const (
@@ -37,6 +38,7 @@ const (
 	EventSessionsList    = "sessions_list"
 	EventResumeAck       = "resume_ack"
 	EventDeleteAck       = "delete_ack"
+	EventContextStats    = "ctx_stat"
 	EventPong            = "pong"
 	EventError           = "error"
 )
@@ -97,9 +99,10 @@ type Request struct {
 
 // Usage reports token usage for a completed turn.
 type Usage struct {
-	InputTokens     int `json:"input_tokens,omitempty"`
-	OutputTokens    int `json:"output_tokens,omitempty"`
-	CacheReadTokens int `json:"cache_read_tokens,omitempty"`
+	InputTokens      int `json:"input_tokens,omitempty"`
+	OutputTokens     int `json:"output_tokens,omitempty"`
+	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 // SessionSummary describes a persisted historical session returned by list_sessions.
@@ -110,12 +113,66 @@ type SessionSummary struct {
 	UpdatedAt    string `json:"updated_at"`
 }
 
+// ContextConstraintSummary summarizes one ContextLedger entry for observability.
+type ContextConstraintSummary struct {
+	ID           string   `json:"id"`
+	Category     string   `json:"category"`
+	Statement    string   `json:"statement"`
+	Status       string   `json:"status"`
+	SupersededBy string   `json:"superseded_by,omitempty"`
+	Provenance   []string `json:"provenance,omitempty"`
+}
+
+// ContextTurnMetric mirrors one persisted context_metrics turn row.
+type ContextTurnMetric struct {
+	TurnIndex        int     `json:"turn_index"`
+	StrategyMode     string  `json:"strategy_mode"`
+	EpochID          int     `json:"epoch_id"`
+	EpochMaskedCount int     `json:"epoch_masked_count"`
+	LedgerVersion    int     `json:"ledger_version"`
+	LedgerActiveCnt  int     `json:"ledger_active_cnt"`
+	LedgerSuperseded int     `json:"ledger_superseded"`
+	LedgerHash       string  `json:"ledger_hash"`
+	ContextBuildMs   float64 `json:"context_build_ms"`
+	InputTokens      int     `json:"input_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	RecallCalls      int     `json:"recall_calls"`
+	RestoreCalls     int     `json:"restore_calls"`
+	CreatedAt        string  `json:"created_at,omitempty"`
+}
+
+// ContextStats carries read-only session context/cache observability data returned by ctx_stat.
+type ContextStats struct {
+	SessionID             string                     `json:"session_id"`
+	MessageCount          int                        `json:"message_count"`
+	EpochID               int                        `json:"epoch_id"`
+	EpochStride           int                        `json:"epoch_stride"`
+	EpochPosition         int                        `json:"epoch_position"`
+	FreezeBoundary        int                        `json:"freeze_boundary"`
+	MaskedCount           int                        `json:"masked_count"`
+	MaskWindow            int                        `json:"mask_window"`
+	LedgerVersion         int                        `json:"ledger_version"`
+	LedgerHash            string                     `json:"ledger_hash,omitempty"`
+	LedgerActiveCnt       int                        `json:"ledger_active_cnt"`
+	LedgerSuperseded      int                        `json:"ledger_superseded"`
+	LedgerResolvedCnt     int                        `json:"ledger_resolved_cnt"`
+	ActiveConstraints     []ContextConstraintSummary `json:"active_constraints,omitempty"`
+	SupersededConstraints []ContextConstraintSummary `json:"superseded_constraints,omitempty"`
+	RecentTurns           []ContextTurnMetric        `json:"recent_turns,omitempty"`
+	TotalRecallCalls      int                        `json:"total_recall_calls"`
+	TotalRestoreCalls     int                        `json:"total_restore_calls"`
+	TotalTurns            int                        `json:"total_turns"`
+}
+
 // Event represents an outgoing AGP JSONL event frame.
 type Event struct {
 	ID           string           `json:"id"`
 	Event        string           `json:"event"`
 	SessionID    string           `json:"session_id,omitempty"`
 	Sessions     []SessionSummary `json:"sessions,omitempty"`
+	ContextStats *ContextStats    `json:"context_stats,omitempty"`
 	ApprovalID   string         `json:"approval_id,omitempty"`
 	QuestionID   string         `json:"question_id,omitempty"`
 	Question     string         `json:"question,omitempty"`
