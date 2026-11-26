@@ -380,3 +380,38 @@ func TestParseSkillFile_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestResourceLoader_SkipsNestedReferencesAndUsesCatalogForLargeSkills(t *testing.T) {
+	homeDir := t.TempDir()
+	cwdDir := t.TempDir()
+
+	// Create a skill with SKILL.md (> 24KB across two skills) and a huge nested references doc.
+	skillDir := filepath.Join(homeDir, ".agents", "skills", "lark-sheets")
+	refDir := filepath.Join(skillDir, "references")
+	if err := os.MkdirAll(refDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	bigBody := strings.Repeat("Sheet operation details and API notes.\n", 800) // ~31 KB > 24KB budget
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: lark-sheets\ndescription: Feishu spreadsheets\n---\n"+bigBody), 0644)
+	_ = os.WriteFile(filepath.Join(refDir, "lark-sheets-write-cells.md"), []byte(strings.Repeat("Nested reference payload\n", 500)), 0644)
+
+	loader := NewResourceLoader(cwdDir, homeDir)
+	skills, err := loader.LoadSkills()
+	if err != nil {
+		t.Fatalf("LoadSkills error = %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "lark-sheets" {
+		t.Fatalf("expected nested references/ not to be promoted as extra skills; got %d skills (%+v)", len(skills), skills)
+	}
+
+	sp := loader.BuildSystemPrompt("Base prompt")
+	if !strings.Contains(sp, "## Skill: lark-sheets") || !strings.Contains(sp, "Feishu spreadsheets") {
+		t.Fatalf("expected skill catalog entry in system prompt, got len=%d", len(sp))
+	}
+	if strings.Contains(sp, "Sheet operation details and API notes.") {
+		t.Fatalf("expected Progressive Disclosure catalog mode to omit >24KB inline instructions, got len=%d", len(sp))
+	}
+	if !strings.Contains(sp, "Progressive Disclosure active") {
+		t.Fatalf("expected Progressive Disclosure notice in system prompt")
+	}
+}

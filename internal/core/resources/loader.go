@@ -155,7 +155,19 @@ func (r *ResourceLoader) scanSkillsDir(dir, source string, targetMap map[string]
 	}
 
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			// If a skill directory contains SKILL.md (or skill.md), treat the directory as a
+			// self-contained skill package and skip nested references/examples/workflows docs.
+			if skillFile := findSkillEntryFile(path); skillFile != "" {
+				if skill, parseErr := ParseSkillFile(skillFile); parseErr == nil && skill != nil && skill.Name != "" && !strings.EqualFold(skill.Name, "readme") {
+					skill.Source = source
+					targetMap[skill.Name] = *skill
+				}
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -172,6 +184,22 @@ func (r *ResourceLoader) scanSkillsDir(dir, source string, targetMap map[string]
 		}
 		return nil
 	})
+}
+
+func findSkillEntryFile(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.EqualFold(entry.Name(), "SKILL.md") {
+			return filepath.Join(dir, entry.Name())
+		}
+	}
+	return ""
 }
 
 // LoadProjectContext 加载项目级工程规范及技能
@@ -232,7 +260,17 @@ func (r *ResourceLoader) BuildSystemPrompt(basePrompt string) string {
 				}
 			}
 			if len(enabledSkills) > 0 {
+				const maxInlineSkillsBytes = 24 * 1024
+				totalInstrBytes := 0
+				for _, s := range enabledSkills {
+					totalInstrBytes += len(s.Instructions)
+				}
+				catalogOnly := totalInstrBytes > maxInlineSkillsBytes
+
 				sb.WriteString("# Available Domain Skills\n\n")
+				if catalogOnly {
+					sb.WriteString("_Progressive Disclosure active: only Skill names, paths, and descriptions are listed below to preserve context budget. Use the `read` tool on a Skill's `Path` when a task matches its description._\n\n")
+				}
 				for _, s := range enabledSkills {
 					fmt.Fprintf(&sb, "## Skill: %s\n", s.Name)
 					if s.Path != "" {
@@ -243,7 +281,7 @@ func (r *ResourceLoader) BuildSystemPrompt(basePrompt string) string {
 					} else if s.Path != "" {
 						sb.WriteString("\n")
 					}
-					if s.Instructions != "" {
+					if !catalogOnly && s.Instructions != "" {
 						sb.WriteString(s.Instructions)
 						sb.WriteString("\n\n")
 					}
