@@ -82,18 +82,20 @@ func ApplyEpochObservationMaskingWithStats(messages []ai.Message, epochStride, m
 	return out, epochID, freezeBoundary, maskedCount
 }
 
-// ApplyEpochObservationMaskingWithOffset applies Epoch-frozen masking using priorOffset
-// (count of compacted historical messages prior to messages[0]) so Epoch progress remains
-// monotonic across compactions and folded counts reflect compacted + masked tool outputs.
-func ApplyEpochObservationMaskingWithOffset(messages []ai.Message, epochStride, minRecentToolTurns, priorOffset int) (out []ai.Message, epochID int, freezeBoundary int, maskedCount int, epochPos int) {
-	if priorOffset < 0 {
-		priorOffset = 0
+// ApplyEpochObservationMaskingWithOffset applies Epoch-frozen masking using priorToolTurnOffset
+// (count of compacted historical tool-calling turns prior to messages[0]) so Epoch progress remains
+// monotonic across compactions and advances strictly by logical tool-calling turns (epochStride tool
+// turns per Epoch).
+func ApplyEpochObservationMaskingWithOffset(messages []ai.Message, epochStride, minRecentToolTurns, priorToolTurnOffset int) (out []ai.Message, epochID int, freezeBoundary int, maskedCount int, epochPos int) {
+	if priorToolTurnOffset < 0 {
+		priorToolTurnOffset = 0
 	}
 	if minRecentToolTurns <= 0 || len(messages) == 0 {
-		if epochStride > 1 && priorOffset > 0 {
-			epochID = priorOffset / epochStride
+		if epochStride > 1 && priorToolTurnOffset > 0 {
+			epochID = priorToolTurnOffset / epochStride
+			epochPos = priorToolTurnOffset % epochStride
 		}
-		return messages, epochID, 0, 0, 0
+		return messages, epochID, 0, 0, epochPos
 	}
 	if epochStride <= 1 {
 		cutoff := FindToolWindowCutoff(messages, minRecentToolTurns)
@@ -104,44 +106,57 @@ func ApplyEpochObservationMaskingWithOffset(messages []ai.Message, epochStride, 
 		return out, 0, cutoff, maskedCount, 0
 	}
 
-	recentCutoff := FindToolWindowCutoff(messages, minRecentToolTurns)
-	if recentCutoff <= 0 {
-		// Fallback safeguard: if cumulative history has already crossed at least 1 Epoch and
-		// older oversized tool outputs remain outside a recent message tail, advance cutoff to
-		// fold them instead of keeping Epoch frozen at #0 forever.
-		if priorOffset+len(messages) >= epochStride && hasMaskableToolOutput(messages) {
-			if fallback := findTailMessageCutoff(messages, minRecentToolTurns*2); fallback > 0 {
-				recentCutoff = fallback
-			}
+	toolIndices := findToolTurnIndices(messages)
+	localToolTurns := len(toolIndices)
+	globalTotalTurns := priorToolTurnOffset + localToolTurns
+
+	globalCutoffTurn := globalTotalTurns - minRecentToolTurns
+	if globalCutoffTurn < 0 {
+		globalCutoffTurn = 0
+	}
+
+	if priorToolTurnOffset > 0 || localToolTurns > minRecentToolTurns {
+		globalFreezeTurn := (globalCutoffTurn / epochStride) * epochStride
+		epochID = globalFreezeTurn / epochStride
+		epochPos = globalCutoffTurn - globalFreezeTurn
+
+		localFreezeTurn := globalFreezeTurn - priorToolTurnOffset
+		if localFreezeTurn <= 0 {
+			return messages, epochID, 0, 0, epochPos
+		}
+		if localFreezeTurn >= localToolTurns {
+			freezeBoundary = len(messages)
+		} else {
+			freezeBoundary = toolIndices[localFreezeTurn]
+		}
+		if freezeBoundary <= 0 {
+			return messages, epochID, 0, 0, epochPos
+		}
+		out, maskedCount = maskToolOutputsBefore(messages, freezeBoundary)
+		return out, epochID, freezeBoundary, maskedCount, epochPos
+	}
+
+	// Fallback safeguard: when a conversation has at most minRecentToolTurns tool calls followed
+	// by a long non-tool tail while still holding a maskable oversized tool output, fold prior to
+	// the recent message tail once conversation length reaches epochStride + 2*minRecentToolTurns.
+	if hasMaskableToolOutput(messages) && len(messages) >= epochStride+minRecentToolTurns*2 {
+		if fallback := findTailMessageCutoff(messages, minRecentToolTurns*2); fallback > 0 {
+			out, maskedCount = maskToolOutputsBefore(messages, fallback)
+			return out, epochID, fallback, maskedCount, epochPos
 		}
 	}
-	if recentCutoff <= 0 {
-		if priorOffset > 0 {
-			globalEnd := priorOffset + len(messages)
-			epochID = globalEnd / epochStride
-			epochPos = globalEnd % epochStride
+
+	return messages, epochID, 0, 0, epochPos
+}
+
+func findToolTurnIndices(messages []ai.Message) []int {
+	var indices []int
+	for i, m := range messages {
+		if m.Role == ai.RoleAssistant && len(m.ToolCalls) > 0 {
+			indices = append(indices, i)
 		}
-		return messages, epochID, 0, 0, epochPos
 	}
-
-	globalCutoff := priorOffset + recentCutoff
-	globalFreeze := (globalCutoff / epochStride) * epochStride
-	epochID = globalFreeze / epochStride
-	epochPos = globalCutoff - globalFreeze
-
-	freezeBoundary = globalFreeze - priorOffset
-	if freezeBoundary < 0 {
-		freezeBoundary = 0
-	}
-	if freezeBoundary > len(messages) {
-		freezeBoundary = len(messages)
-	}
-	if freezeBoundary <= 0 {
-		return messages, epochID, 0, 0, epochPos
-	}
-
-	out, maskedCount = maskToolOutputsBefore(messages, freezeBoundary)
-	return out, epochID, freezeBoundary, maskedCount, epochPos
+	return indices
 }
 
 func hasMaskableToolOutput(messages []ai.Message) bool {

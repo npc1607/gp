@@ -224,10 +224,9 @@ func (a *AgentInstance) assembleModelMessagesWithMetrics() ([]ai.Message, assemb
 		return nil, meta
 	}
 
-	raw, priorOffset := st.GetLinearContextWithOffset()
+	raw, priorToolTurns := st.GetLinearContextWithToolOffset()
 	effectiveSys := sp
 	foundExistingSys := false
-	strippedSys := 0
 	window := make([]ai.Message, 0, len(raw))
 	for _, m := range raw {
 		if m.Role == ai.RoleSystem {
@@ -236,13 +235,12 @@ func (a *AgentInstance) assembleModelMessagesWithMetrics() ([]ai.Message, assemb
 				effectiveSys = m.Content
 				foundExistingSys = true
 			}
-			strippedSys++
 			continue
 		}
 		window = append(window, m)
 	}
 
-	maskedWindow, epochID, _, maskedCount, _ := ApplyEpochObservationMaskingWithOffset(window, obsEpoch, obsWindow, priorOffset+strippedSys)
+	maskedWindow, epochID, _, maskedCount, _ := ApplyEpochObservationMaskingWithOffset(window, obsEpoch, obsWindow, priorToolTurns)
 	meta.epochID = epochID
 	meta.epochMaskedCount = maskedCount
 	meta.sysTokens = compaction.EstimateTextTokens(effectiveSys)
@@ -328,7 +326,7 @@ func (a *AgentInstance) persistContextLedgerDoc(ctx context.Context, force bool)
 }
 
 func (a *AgentInstance) currentEpochIDLocked(st interface {
-	GetLinearContextWithOffset() ([]ai.Message, int)
+	GetLinearContextWithToolOffset() ([]ai.Message, int)
 }) int {
 	if st == nil {
 		return 0
@@ -338,17 +336,15 @@ func (a *AgentInstance) currentEpochIDLocked(st interface {
 	obsEpoch := a.observationMaskEpoch
 	a.mu.RUnlock()
 
-	raw, priorOffset := st.GetLinearContextWithOffset()
-	stripped := 0
+	raw, priorToolTurns := st.GetLinearContextWithToolOffset()
 	window := make([]ai.Message, 0, len(raw))
 	for _, m := range raw {
 		if m.Role == ai.RoleSystem {
-			stripped++
 			continue
 		}
 		window = append(window, m)
 	}
-	_, epochID, _, _, _ := ApplyEpochObservationMaskingWithOffset(window, obsEpoch, obsWindow, priorOffset+stripped)
+	_, epochID, _, _, _ := ApplyEpochObservationMaskingWithOffset(window, obsEpoch, obsWindow, priorToolTurns)
 	return epochID
 }
 

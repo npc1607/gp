@@ -160,7 +160,11 @@ func (d *dummyReplayTool) Execute(_ *tools.ToolContext, _ json.RawMessage) (*too
 func TestEpochObservationMasking_FreezesWithinEpoch(t *testing.T) {
 	large := strings.Repeat("verbose line payload\n", 25)
 	var msgs []ai.Message
-	for turn := 0; turn < 15; turn++ {
+	// Build 36 tool-calling turns (72 messages), interspersed with user text messages.
+	for turn := 0; turn < 36; turn++ {
+		if turn%4 == 0 {
+			msgs = append(msgs, ai.NewUserMessage(fmt.Sprintf("step %d", turn)))
+		}
 		cid := fmt.Sprintf("c_%02d", turn)
 		msgs = append(msgs,
 			ai.Message{
@@ -175,21 +179,51 @@ func TestEpochObservationMasking_FreezesWithinEpoch(t *testing.T) {
 		)
 	}
 
-	// Compare turn 13 (26 msgs, recentCutoff=16) vs turn 14 (28 msgs, recentCutoff=18) vs turn 15 (30 msgs, recentCutoff=20)
-	// All stay at freezeBoundary=16, preserving 100% prefix match!
-	m13 := applyEpochObservationMasking(msgs[:26], 16, 5)
-	m14 := applyEpochObservationMasking(msgs[:28], 16, 5)
-	m15 := applyEpochObservationMasking(msgs[:30], 16, 5)
+	// Find slice end indices immediately after tool turn N completes (0-indexed turn count = N).
+	endAfterTurn := func(turns int) int {
+		seen := 0
+		for i, m := range msgs {
+			if m.Role == ai.RoleAssistant && len(m.ToolCalls) > 0 {
+				seen++
+				if seen == turns {
+					return i + 2 // include assistant + tool response
+				}
+			}
+		}
+		return len(msgs)
+	}
 
-	for i := 0; i < len(m13); i++ {
-		if m13[i].Content != m14[i].Content || m13[i].Content != m15[i].Content {
+	// Turn 20 (cutoff = 15 < 16): stays in Epoch 0 with 0 tool outputs masked.
+	_, ep20, fb20, masked20, pos20 := ApplyEpochObservationMaskingWithOffset(msgs[:endAfterTurn(20)], 16, 5, 0)
+	if ep20 != 0 || fb20 != 0 || masked20 != 0 || pos20 != 15 {
+		t.Fatalf("expected turn 20 in Epoch 0 (fb=0 masked=0 pos=15), got ep=%d fb=%d masked=%d pos=%d", ep20, fb20, masked20, pos20)
+	}
+
+	// Turns 21, 25, 36 (cutoffs = 16, 20, 31): all stay in Epoch 1 with identical frozen boundary (turns 0..15).
+	m21, ep21, fb21, masked21, pos21 := ApplyEpochObservationMaskingWithOffset(msgs[:endAfterTurn(21)], 16, 5, 0)
+	m25, ep25, fb25, _, pos25 := ApplyEpochObservationMaskingWithOffset(msgs[:endAfterTurn(25)], 16, 5, 0)
+	m36, ep36, fb36, masked36, pos36 := ApplyEpochObservationMaskingWithOffset(msgs[:endAfterTurn(36)], 16, 5, 0)
+
+	if ep21 != 1 || ep25 != 1 || ep36 != 1 || fb21 != fb25 || fb21 != fb36 {
+		t.Fatalf("expected all of turns 21/25/36 frozen in Epoch 1 with same freezeBoundary, got ep=(%d,%d,%d) fb=(%d,%d,%d)", ep21, ep25, ep36, fb21, fb25, fb36)
+	}
+	if pos21 != 0 || pos25 != 4 || pos36 != 15 || masked21 != 16 || masked36 != 16 {
+		t.Fatalf("unexpected epoch stats: pos=(%d,%d,%d) masked=(%d,%d)", pos21, pos25, pos36, masked21, masked36)
+	}
+
+	for i := 0; i < len(m21); i++ {
+		if m21[i].Content != m25[i].Content || m21[i].Content != m36[i].Content {
 			t.Fatalf("expected frozen prefix at msg %d across epoch 1, got diffs", i)
 		}
 	}
-	// Recent 5 tool outputs (turns 10..14) must remain unmasked in m15.
-	for _, idx := range []int{21, 23, 25, 27, 29} {
-		if strings.Contains(m15[idx].Content, "[已折叠历史工具输出") {
-			t.Fatalf("expected recent tool msg %d to remain unmasked", idx)
+	// Recent 5 tool outputs (turns 31..35) must remain unmasked in m36.
+	toolTailSeen := 0
+	for i := len(m36) - 1; i >= 0 && toolTailSeen < 5; i-- {
+		if m36[i].Role == ai.RoleTool {
+			toolTailSeen++
+			if strings.Contains(m36[i].Content, "[已折叠历史工具输出") {
+				t.Fatalf("expected recent tool msg %d to remain unmasked", i)
+			}
 		}
 	}
 }

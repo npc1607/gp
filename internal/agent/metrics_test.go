@@ -250,10 +250,22 @@ func TestCompact_FreezesLedgerWithinSameEpochAndUpdatesOnNextEpoch(t *testing.T)
 		t.Fatalf("expected frozen ledger instruction in prompt #2, got:\n%s", capturedPrompts[1])
 	}
 
-	// Advance past Epoch 1 boundary (>= 16 messages total)
-	for i := 0; i < 6; i++ {
-		reloadedTree.AppendMessage(ai.NewUserMessage(fmt.Sprintf("epoch1 user %d", i)))
-		reloadedTree.AppendMessage(ai.NewAssistantMessage(fmt.Sprintf("epoch1 assistant %d", i), ""))
+	// Advance past Epoch 1 boundary (>= 16+window = 21 tool-calling turns total)
+	for i := 0; i < 21; i++ {
+		cid := fmt.Sprintf("call_ep1_%02d", i)
+		reloadedTree.AppendMessage(ai.Message{
+			Role: ai.RoleAssistant,
+			ToolCalls: []ai.ToolCall{{
+				ID:       cid,
+				Type:     "function",
+				Function: ai.FunctionCall{Name: "read", Arguments: json.RawMessage(`{}`)},
+			}},
+		})
+		reloadedTree.AppendMessage(ai.Message{
+			Role:       ai.RoleTool,
+			ToolCallID: cid,
+			Content:    fmt.Sprintf("ok %d", i),
+		})
 	}
 	res3, err := reloaded.Compact(context.Background(), "")
 	if err != nil {
@@ -279,7 +291,7 @@ func TestEpochObservationMasking_MonotonicAcrossCompactionAndGiantSingleTool(t *
 
 	largeOut := strings.Repeat("giant tool output line payload\n", 40) // > 400 bytes & > 8 lines
 
-	// Record 20 messages starting with a single giant tool call followed by pure text turns (< 5 tool calls!)
+	// 1. Single giant tool call followed by long non-tool Q&A tail (27 msgs >= 16+2*5) triggers fallback folding.
 	st.AppendMessage(ai.NewUserMessage("read big file once"))
 	st.AppendMessage(ai.Message{
 		Role: ai.RoleAssistant,
@@ -299,25 +311,48 @@ func TestEpochObservationMasking_MonotonicAcrossCompactionAndGiantSingleTool(t *
 		st.AppendMessage(ai.NewAssistantMessage(fmt.Sprintf("a %d", i), ""))
 	}
 
-	raw1, off1 := st.GetLinearContextWithOffset()
+	raw1, off1 := st.GetLinearContextWithToolOffset()
 	if off1 != 0 {
-		t.Fatalf("expected priorOffset=0 before compaction, got %d", off1)
+		t.Fatalf("expected priorToolTurnOffset=0 before compaction, got %d", off1)
 	}
-	masked1, ep1, _, folded1, _ := ApplyEpochObservationMaskingWithOffset(raw1, DefaultObservationMaskEpoch, DefaultObservationMaskWindow, off1)
-	if ep1 < 1 || folded1 < 1 {
-		t.Fatalf("expected single giant tool output to advance into Epoch >=1 and fold once past Epoch 1, got ep=%d folded=%d", ep1, folded1)
+	masked1, _, _, folded1, _ := ApplyEpochObservationMaskingWithOffset(raw1, DefaultObservationMaskEpoch, DefaultObservationMaskWindow, off1)
+	if folded1 < 1 {
+		t.Fatalf("expected single giant tool output to fold via fallback once conversation grows long, got folded=%d", folded1)
 	}
 	if !strings.Contains(masked1[2].Content, "[已折叠历史工具输出:") {
 		t.Fatalf("expected call_giant_0 to be folded, got %q", masked1[2].Content)
 	}
 
-	// Simulate compaction truncating linear context down to 6 kept messages
+	// 2. Append 20 more tool turns (total = 21 tool turns -> crosses Epoch 1 by tool-turn stride).
+	for i := 0; i < 20; i++ {
+		cid := fmt.Sprintf("call_pre_%02d", i)
+		st.AppendMessage(ai.Message{
+			Role: ai.RoleAssistant,
+			ToolCalls: []ai.ToolCall{{
+				ID:       cid,
+				Type:     "function",
+				Function: ai.FunctionCall{Name: "bash", Arguments: json.RawMessage(`{}`)},
+			}},
+		})
+		st.AppendMessage(ai.Message{
+			Role:       ai.RoleTool,
+			ToolCallID: cid,
+			Content:    largeOut,
+		})
+	}
+	rawPre, offPre := st.GetLinearContextWithToolOffset()
+	_, epPre, _, _, _ := ApplyEpochObservationMaskingWithOffset(rawPre, DefaultObservationMaskEpoch, DefaultObservationMaskWindow, offPre)
+	if epPre != 1 {
+		t.Fatalf("expected Epoch 1 at 21 tool turns, got %d", epPre)
+	}
+
+	// Simulate compaction truncating linear context down to the last 6 messages (3 kept tool turns -> priorToolTurnOffset = 18).
 	linearBefore := st.GetLinearContext()
 	kept := linearBefore[len(linearBefore)-6:]
-	st.AppendCompaction("Compacted earlier 21 messages", kept)
+	st.AppendCompaction("Compacted earlier 21 tool turns", kept)
 
-	// Append 10 more messages after compaction (cumulative total = 37 messages -> Epoch 2)
-	for i := 0; i < 5; i++ {
+	// Append 2 more tool turns after compaction (total = 23 tool turns -> Epoch 1 continues monotonically).
+	for i := 0; i < 2; i++ {
 		cid := fmt.Sprintf("call_post_%d", i)
 		st.AppendMessage(ai.Message{
 			Role: ai.RoleAssistant,
@@ -334,12 +369,35 @@ func TestEpochObservationMasking_MonotonicAcrossCompactionAndGiantSingleTool(t *
 		})
 	}
 
-	raw2, off2 := st.GetLinearContextWithOffset()
-	if off2 <= 0 {
-		t.Fatalf("expected positive priorOffset after compaction, got %d", off2)
+	raw2, off2 := st.GetLinearContextWithToolOffset()
+	if off2 != 18 {
+		t.Fatalf("expected priorToolTurnOffset=18 after compaction, got %d", off2)
 	}
-	_, ep2, _, folded2, _ := ApplyEpochObservationMaskingWithOffset(raw2, DefaultObservationMaskEpoch, DefaultObservationMaskWindow, off2)
-	if ep2 < 1 {
-		t.Fatalf("expected Epoch to remain >= 1 after compaction (never reset to 0), got ep=%d off=%d len=%d folded=%d", ep2, off2, len(raw2), folded2)
+	_, ep2, _, _, pos2 := ApplyEpochObservationMaskingWithOffset(raw2, DefaultObservationMaskEpoch, DefaultObservationMaskWindow, off2)
+	if ep2 != 1 || pos2 != 2 {
+		t.Fatalf("expected Epoch=1 pos=2 after compaction (never reset to 0), got ep=%d off=%d pos=%d", ep2, off2, pos2)
+	}
+
+	// Append 14 more tool turns -> total = 37 tool turns (cutoff = 32 -> crosses into Epoch 2!).
+	for i := 2; i < 16; i++ {
+		cid := fmt.Sprintf("call_post_%d", i)
+		st.AppendMessage(ai.Message{
+			Role: ai.RoleAssistant,
+			ToolCalls: []ai.ToolCall{{
+				ID:       cid,
+				Type:     "function",
+				Function: ai.FunctionCall{Name: "bash", Arguments: json.RawMessage(`{}`)},
+			}},
+		})
+		st.AppendMessage(ai.Message{
+			Role:       ai.RoleTool,
+			ToolCallID: cid,
+			Content:    largeOut,
+		})
+	}
+	raw3, off3 := st.GetLinearContextWithToolOffset()
+	_, ep3, fb3, folded3, pos3 := ApplyEpochObservationMaskingWithOffset(raw3, DefaultObservationMaskEpoch, DefaultObservationMaskWindow, off3)
+	if ep3 != 2 || pos3 != 0 || fb3 <= 0 || folded3 <= 0 {
+		t.Fatalf("expected advance to Epoch 2 after 14 more post-compaction tool turns, got ep=%d pos=%d fb=%d folded=%d", ep3, pos3, fb3, folded3)
 	}
 }

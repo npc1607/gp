@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"gp/internal/ai"
 	"gp/internal/core/compaction"
@@ -167,42 +168,11 @@ func TestEpoch16FrozenMasking_LCPPrefixStabilityAndE4AOrder(t *testing.T) {
 	st := ag.GetSessionTree()
 	largeOutput := strings.Repeat("diagnostic log line payload\n", 30)
 
-	// Append 11 tool-calling turns (22 messages: well past Epoch=16 boundary with window=5)
-	for i := 0; i < 11; i++ {
-		cid := fmt.Sprintf("call_%02d", i)
-		st.AppendMessage(ai.Message{
-			Role: ai.RoleAssistant,
-			ToolCalls: []ai.ToolCall{{
-				ID:       cid,
-				Type:     "function",
-				Function: ai.FunctionCall{Name: "read", Arguments: json.RawMessage(`{}`)},
-			}},
-		})
-		st.AppendMessage(ai.Message{
-			Role:       ai.RoleTool,
-			ToolCallID: cid,
-			Content:    fmt.Sprintf("turn_%02d\n%s", i, largeOutput),
-		})
-	}
-
-	asm1 := ag.assembleModelMessages()
-	// Verify E4-A PR #1 prefix order: [System (CacheControl)] -> [ContextLedger (CacheControl)] -> [Epoch RecentWindow...]
-	if len(asm1) < 3 {
-		t.Fatalf("expected at least 3 messages, got %d", len(asm1))
-	}
-	if asm1[0].Role != ai.RoleSystem || !asm1[0].CacheControl {
-		t.Fatalf("expected asm1[0] to be cached RoleSystem, got %+v", asm1[0])
-	}
-	if asm1[1].Role != ai.RoleUser || !asm1[1].CacheControl || !strings.Contains(asm1[1].Content, "[CONTEXT_LEDGER]") {
-		t.Fatalf("expected asm1[1] to be cached [CONTEXT_LEDGER], got %+v", asm1[1])
-	}
-	if !strings.Contains(asm1[2].Content, "") && asm1[2].Role != ai.RoleAssistant {
-		t.Fatalf("expected Epoch RecentWindow to start right after ContextLedger")
-	}
-
-	// Verify turns within Epoch 0 (turns 11 -> 11) and then across Epoch 1 (turns 13..19):
-	// First check transition at turn 12 (recentCutoff reaches 16 -> freezeBoundary jumps from 0 to 16).
+	// Append 20 tool-calling turns (recentCutoff = 15 < 16 -> stays in Epoch 0).
 	appendToolTurn := func(idx int) {
+		if idx%5 == 0 {
+			st.AppendMessage(ai.NewUserMessage(fmt.Sprintf("user prompt %d", idx)))
+		}
 		cid := fmt.Sprintf("call_%02d", idx)
 		st.AppendMessage(ai.Message{
 			Role: ai.RoleAssistant,
@@ -219,36 +189,187 @@ func TestEpoch16FrozenMasking_LCPPrefixStabilityAndE4AOrder(t *testing.T) {
 		})
 	}
 
-	// Turn 11 stays in Epoch 0 (recentCutoff=14 < 16) -> 100% prefix match with asm1.
-	appendToolTurn(11)
-	asmTurn11 := ag.assembleModelMessages()
+	for i := 0; i < 19; i++ {
+		appendToolTurn(i)
+	}
+
+	asm1 := ag.assembleModelMessages()
+	// Verify E4-A PR #1 prefix order: [System (CacheControl)] -> [ContextLedger (CacheControl)] -> [Epoch RecentWindow...]
+	if len(asm1) < 3 {
+		t.Fatalf("expected at least 3 messages, got %d", len(asm1))
+	}
+	if asm1[0].Role != ai.RoleSystem || !asm1[0].CacheControl {
+		t.Fatalf("expected asm1[0] to be cached RoleSystem, got %+v", asm1[0])
+	}
+	if asm1[1].Role != ai.RoleUser || !asm1[1].CacheControl || !strings.Contains(asm1[1].Content, "[CONTEXT_LEDGER]") {
+		t.Fatalf("expected asm1[1] to be cached [CONTEXT_LEDGER], got %+v", asm1[1])
+	}
+
+	// Turn 19 (20th tool turn, cutoff = 15 < 16) stays in Epoch 0 -> 100% byte-identical prefix with asm1.
+	appendToolTurn(19)
+	asmTurn19 := ag.assembleModelMessages()
 	for i := 0; i < len(asm1); i++ {
-		if asm1[i].Role != asmTurn11[i].Role || asm1[i].Content != asmTurn11[i].Content {
-			t.Fatalf("Epoch 0 prefix mutated at index %d on turn 11", i)
+		if asm1[i].Role != asmTurn19[i].Role || asm1[i].Content != asmTurn19[i].Content {
+			t.Fatalf("Epoch 0 prefix mutated at index %d on tool turn 19", i)
 		}
 	}
 
-	// Turn 12 crosses Epoch 1 boundary (recentCutoff=16 -> freezeBoundary=16): call_00 gets masked once.
-	appendToolTurn(12)
+	// Turn 20 (21st tool turn, cutoff = 16 -> Epoch 1) folds tool turns 0..15 while keeping turns 16..20 raw.
+	appendToolTurn(20)
 	asmEpoch1Start := ag.assembleModelMessages()
-	if !strings.Contains(asmEpoch1Start[3].Content, "[已折叠历史工具输出: tool=read call_id=call_00") {
-		t.Fatalf("expected call_00 to be masked on Epoch 1 boundary, got %q", asmEpoch1Start[3].Content)
-	}
-
-	// Turns 13..19 remain strictly inside Epoch 1 (recentCutoff=18..30 < 32):
-	// 100% of prior prefix stays byte-identical on every single step!
-	prev := asmEpoch1Start
-	for extra := 13; extra <= 19; extra++ {
-		appendToolTurn(extra)
-		asmNext := ag.assembleModelMessages()
-		if len(asmNext) <= len(prev) {
-			t.Fatalf("expected append-only growth, got len %d <= %d", len(asmNext), len(prev))
-		}
-		for i := 0; i < len(prev); i++ {
-			if prev[i].Role != asmNext[i].Role || prev[i].Content != asmNext[i].Content || prev[i].CacheControl != asmNext[i].CacheControl {
-				t.Fatalf("Epoch 1 prefix mutated at index %d on turn %d!\nwant: %q\ngot:  %q", i, extra, prev[i].Content, asmNext[i].Content)
+	var call00Found bool
+	for _, m := range asmEpoch1Start {
+		if m.ToolCallID == "call_00" {
+			call00Found = true
+			if !strings.Contains(m.Content, "[已折叠历史工具输出: tool=read call_id=call_00") {
+				t.Fatalf("expected call_00 to be masked on Epoch 1 boundary, got %q", m.Content)
 			}
 		}
-		prev = asmNext
+		if m.ToolCallID == "call_16" && strings.Contains(m.Content, "[已折叠历史工具输出:") {
+			t.Fatalf("expected call_16 to remain raw inside active window, got %q", m.Content)
+		}
+	}
+	if !call00Found {
+		t.Fatalf("expected call_00 in assembled messages")
+	}
+
+	// Turns 21..35 stay strictly inside Epoch 1 (cutoff = 17..31 < 32):
+	// 100% of prior prefix stays byte-identical on every single step!
+	prev := marshalWireMessageBytes(t, asmEpoch1Start)
+	for extra := 21; extra <= 35; extra++ {
+		appendToolTurn(extra)
+		asmNext := ag.assembleModelMessages()
+		nextBytes := marshalWireMessageBytes(t, asmNext)
+		if len(nextBytes) <= len(prev) {
+			t.Fatalf("expected append-only growth, got len %d <= %d", len(nextBytes), len(prev))
+		}
+		for i := 0; i < len(prev); i++ {
+			if string(prev[i]) != string(nextBytes[i]) {
+				t.Fatalf("Epoch 1 prefix mutated at index %d on tool turn %d!\nwant: %s\ngot:  %s", i, extra, prev[i], nextBytes[i])
+			}
+		}
+		prev = nextBytes
+	}
+}
+
+func marshalWireMessageBytes(t *testing.T, msgs []ai.Message) [][]byte {
+	t.Helper()
+	out := make([][]byte, len(msgs))
+	for i, m := range msgs {
+		// Provider wire serializers ignore local metadata timestamps, which NewSystemMessage refreshes per call.
+		m.Timestamp = time.Time{}
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("json.Marshal(msg[%d]) error = %v", i, err)
+		}
+		out[i] = b
+	}
+	return out
+}
+
+func TestEpoch16ToolTurns_ThreeEpochs_Epoch0BytesImmutable(t *testing.T) {
+	store, err := sqlite.Open(t.TempDir() + "/three_epochs.db")
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ag := NewAgent("three-epoch-lcp", "sys prompt", nil, "claude-4-sonnet", tools.NewRegistry())
+	ag.SetStorage(store)
+	st, err := session.NewSessionTree("three-epoch-lcp", store)
+	if err != nil {
+		t.Fatalf("NewSessionTree() error = %v", err)
+	}
+	ag.SetSessionTree(st)
+
+	ledger := compaction.NewContextLedger()
+	ledger.Apply("add", "cst_go", "runtime", "Go 1.24 + SQLite WAL", "", []string{"e1"}, 1)
+	ag.SetContextLedger(ledger)
+
+	largeOutput := strings.Repeat("detailed stacktrace and log payload line\n", 30)
+	appendToolTurn := func(turn int) {
+		if turn%6 == 0 {
+			st.AppendMessage(ai.NewUserMessage(fmt.Sprintf("user guidance at tool turn %d", turn)))
+		}
+		cid := fmt.Sprintf("call_3ep_%03d", turn)
+		st.AppendMessage(ai.Message{
+			Role: ai.RoleAssistant,
+			ToolCalls: []ai.ToolCall{{
+				ID:       cid,
+				Type:     "function",
+				Function: ai.FunctionCall{Name: "bash", Arguments: json.RawMessage(fmt.Sprintf(`{"step":%d}`, turn))},
+			}},
+		})
+		st.AppendMessage(ai.Message{
+			Role:       ai.RoleTool,
+			ToolCallID: cid,
+			Content:    fmt.Sprintf("output_%03d\n%s", turn, largeOutput),
+		})
+	}
+
+	// Build through turn 20 -> enters Epoch #1 (tool turns 0..15 frozen; 16..20 recent window).
+	for i := 0; i <= 20; i++ {
+		appendToolTurn(i)
+	}
+	asmEp1, metaEp1 := ag.assembleModelMessagesWithMetrics()
+	if metaEp1.epochID != 1 {
+		t.Fatalf("expected epochID=1 after 21 tool turns, got %d", metaEp1.epochID)
+	}
+
+	// Locate the exact message prefix corresponding to Epoch #0 (ending right after call_3ep_015's RoleTool response).
+	epoch0MsgLen := 0
+	for i, m := range asmEp1 {
+		if m.Role == ai.RoleTool && m.ToolCallID == "call_3ep_015" {
+			epoch0MsgLen = i + 1
+			break
+		}
+	}
+	if epoch0MsgLen == 0 {
+		t.Fatalf("failed to find end of Epoch #0 (call_3ep_015) in assembled messages")
+	}
+	epoch0FrozenBytes := marshalWireMessageBytes(t, asmEp1[:epoch0MsgLen])
+
+	// Advance through Epoch #1 -> Epoch #2 (at turn 36 = 37 tool turns) -> Epoch #3 (at turn 52 = 53 tool turns).
+	var epoch1FrozenBytes [][]byte
+	epoch1MsgLen := 0
+	for turn := 21; turn <= 53; turn++ {
+		appendToolTurn(turn)
+		asmCurr, metaCurr := ag.assembleModelMessagesWithMetrics()
+		currBytes := marshalWireMessageBytes(t, asmCurr)
+
+		// Invariant 1: Every serialized message in Epoch #0 (plus System & ContextLedger) is 100% byte-identical across #1 -> #2 -> #3!
+		for i := 0; i < epoch0MsgLen; i++ {
+			if string(epoch0FrozenBytes[i]) != string(currBytes[i]) {
+				t.Fatalf("Epoch #0 byte mutation at msg[%d] on tool turn %d (epochID=%d)!\nwant: %s\ngot:  %s",
+					i, turn, metaCurr.epochID, epoch0FrozenBytes[i], currBytes[i])
+			}
+		}
+
+		// Record Epoch #1 frozen prefix right when entering Epoch #2 (turn 36 -> epochID == 2), then assert it never mutates across #2 -> #3.
+		if turn == 36 {
+			if metaCurr.epochID != 2 {
+				t.Fatalf("expected epochID=2 at tool turn 36 (37 turns), got %d", metaCurr.epochID)
+			}
+			for i, m := range asmCurr {
+				if m.Role == ai.RoleTool && m.ToolCallID == "call_3ep_031" {
+					epoch1MsgLen = i + 1
+					break
+				}
+			}
+			if epoch1MsgLen <= epoch0MsgLen {
+				t.Fatalf("expected epoch1MsgLen > epoch0MsgLen, got %d <= %d", epoch1MsgLen, epoch0MsgLen)
+			}
+			epoch1FrozenBytes = currBytes[:epoch1MsgLen]
+		} else if turn > 36 {
+			for i := 0; i < epoch1MsgLen; i++ {
+				if string(epoch1FrozenBytes[i]) != string(currBytes[i]) {
+					t.Fatalf("Epoch #1 byte mutation at msg[%d] on tool turn %d (epochID=%d)!", i, turn, metaCurr.epochID)
+				}
+			}
+		}
+
+		if turn == 52 && metaCurr.epochID != 3 {
+			t.Fatalf("expected epochID=3 at tool turn 52 (53 turns), got %d", metaCurr.epochID)
+		}
 	}
 }

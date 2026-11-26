@@ -311,3 +311,60 @@ func TestSession_AppendMessage_RetriesTransientCommitAndDoesNotLeaveOrphanOnFail
 		t.Fatalf("expected intact chain of 3 entries after recovery, got %+v", msgs)
 	}
 }
+
+func TestSession_GetLinearContextWithToolOffset(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	t.Cleanup(func() { _ = store.Close() })
+
+	st, err := session.NewSessionTree("sess-tool-off", store)
+	if err != nil {
+		t.Fatalf("NewSessionTree error = %v", err)
+	}
+
+	st.AppendMessage(ai.NewUserMessage("start"))
+	for i := 0; i < 4; i++ {
+		st.AppendMessage(ai.Message{
+			Role: ai.RoleAssistant,
+			ToolCalls: []ai.ToolCall{{
+				ID:   string(rune('a' + i)),
+				Type: "function",
+			}},
+		})
+		st.AppendMessage(ai.Message{
+			Role:       ai.RoleTool,
+			ToolCallID: string(rune('a' + i)),
+			Content:    "ok",
+		})
+	}
+	st.AppendMessage(ai.NewAssistantMessage("summary checkpoint", ""))
+
+	before := st.GetLinearContext()
+	// Keep the last 3 messages (1 tool-calling assistant, 1 tool result, 1 final assistant).
+	kept := before[len(before)-3:]
+	st.AppendCompaction("Compacted initial 3 tool turns", kept)
+
+	// Append 2 more tool-calling turns after compaction.
+	for i := 0; i < 2; i++ {
+		st.AppendMessage(ai.Message{
+			Role: ai.RoleAssistant,
+			ToolCalls: []ai.ToolCall{{
+				ID:   string(rune('x' + i)),
+				Type: "function",
+			}},
+		})
+		st.AppendMessage(ai.Message{
+			Role:       ai.RoleTool,
+			ToolCallID: string(rune('x' + i)),
+			Content:    "ok2",
+		})
+	}
+
+	msgs, msgOff, toolOff := st.GetLinearContextWithOffsets()
+	msgsToolOnly, toolOnly := st.GetLinearContextWithToolOffset()
+	if toolOff != 3 || toolOnly != 3 {
+		t.Fatalf("expected priorToolTurnOffset=3 (4 pre-compaction minus 1 kept), got %d / %d", toolOff, toolOnly)
+	}
+	if msgOff <= 0 || len(msgs) != len(msgsToolOnly) {
+		t.Fatalf("unexpected offsets: msgOff=%d len=%d/%d", msgOff, len(msgs), len(msgsToolOnly))
+	}
+}

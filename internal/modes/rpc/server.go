@@ -481,22 +481,20 @@ func (s *Server) handleContextStats(emit func(Event), req Request) {
 	}
 
 	if st, err := session.NewSessionTree(effSessionID, store); err == nil {
-		rawMsgs, priorOffset := st.GetLinearContextWithOffset()
+		rawMsgs, priorMsgOffset, priorToolTurns := st.GetLinearContextWithOffsets()
 		stats.MessageCount = len(rawMsgs)
-		stripped := 0
 		window := make([]ai.Message, 0, len(rawMsgs))
 		for _, m := range rawMsgs {
 			if m.Role == ai.RoleSystem {
-				stripped++
 				continue
 			}
 			window = append(window, m)
 		}
 		_, epochID, freezeBoundary, maskedCount, epochPos := agent.ApplyEpochObservationMaskingWithOffset(
-			window, agent.DefaultObservationMaskEpoch, agent.DefaultObservationMaskWindow, priorOffset+stripped,
+			window, agent.DefaultObservationMaskEpoch, agent.DefaultObservationMaskWindow, priorToolTurns,
 		)
 		stats.EpochID = epochID
-		stats.FreezeBoundary = priorOffset + freezeBoundary
+		stats.FreezeBoundary = priorMsgOffset + freezeBoundary
 		stats.MaskedCount = maskedCount
 		stats.EpochPosition = epochPos
 	}

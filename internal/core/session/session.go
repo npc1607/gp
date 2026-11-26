@@ -284,8 +284,25 @@ func (s *SessionTree) GetLinearContext() []ai.Message {
 }
 
 // GetLinearContextWithOffset 返回线性上下文及最近压缩锚点之前被截断的累计历史消息偏移量，
-// 用于在 Compaction 之后仍保持单调递增的 Epoch 步长边界与折叠统计。
+// 用于兼容现有调用方的消息计数偏移查询。
 func (s *SessionTree) GetLinearContextWithOffset() ([]ai.Message, int) {
+	msgs, priorMsgOffset, _ := s.getLinearContextWithOffsets()
+	return msgs, priorMsgOffset
+}
+
+// GetLinearContextWithToolOffset 返回线性上下文及最近压缩锚点之前被截断的累计工具调用轮次偏移量，
+// 用于在 Compaction 之后仍保持按逻辑工具轮次单调递增的 Epoch 步长边界。
+func (s *SessionTree) GetLinearContextWithToolOffset() ([]ai.Message, int) {
+	msgs, _, priorToolTurnOffset := s.getLinearContextWithOffsets()
+	return msgs, priorToolTurnOffset
+}
+
+// GetLinearContextWithOffsets 同时返回线性上下文、历史被截断消息偏移量与历史被截断工具调用轮次偏移量。
+func (s *SessionTree) GetLinearContextWithOffsets() ([]ai.Message, int, int) {
+	return s.getLinearContextWithOffsets()
+}
+
+func (s *SessionTree) getLinearContextWithOffsets() ([]ai.Message, int, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -312,10 +329,11 @@ func (s *SessionTree) GetLinearContextWithOffset() ([]ai.Message, int) {
 	slices.Reverse(tailAfterCompaction)
 
 	if anchor == nil {
-		return tailAfterCompaction, 0
+		return tailAfterCompaction, 0, 0
 	}
 
 	totalBeforeAnchor := 0
+	toolTurnsBeforeAnchor := 0
 	walkID := anchor.ParentID
 	for walkID != "" {
 		entry, exists := s.entries[walkID]
@@ -324,6 +342,9 @@ func (s *SessionTree) GetLinearContextWithOffset() ([]ai.Message, int) {
 		}
 		if entry.Type == EntryMessage && entry.Message != nil {
 			totalBeforeAnchor++
+			if entry.Message.Role == ai.RoleAssistant && len(entry.Message.ToolCalls) > 0 {
+				toolTurnsBeforeAnchor++
+			}
 		}
 		walkID = entry.ParentID
 	}
@@ -337,19 +358,30 @@ func (s *SessionTree) GetLinearContextWithOffset() ([]ai.Message, int) {
 			Content: "<compacted_context>\n" + trimmed + "\n</compacted_context>",
 		})
 	}
+	keptToolTurns := 0
 	if len(anchor.KeptMessages) > 0 {
 		out = append(out, anchor.KeptMessages...)
+		for _, m := range anchor.KeptMessages {
+			if m.Role == ai.RoleAssistant && len(m.ToolCalls) > 0 {
+				keptToolTurns++
+			}
+		}
 	}
 	out = append(out, tailAfterCompaction...)
 
-	priorOffset := totalBeforeAnchor - len(anchor.KeptMessages)
+	priorMsgOffset := totalBeforeAnchor - len(anchor.KeptMessages)
 	if hasSummary {
-		priorOffset--
+		priorMsgOffset--
 	}
-	if priorOffset < 0 {
-		priorOffset = 0
+	if priorMsgOffset < 0 {
+		priorMsgOffset = 0
 	}
-	return out, priorOffset
+
+	priorToolTurnOffset := toolTurnsBeforeAnchor - keptToolTurns
+	if priorToolTurnOffset < 0 {
+		priorToolTurnOffset = 0
+	}
+	return out, priorMsgOffset, priorToolTurnOffset
 }
 
 // LinearEntry 将线性上下文中的消息与其原始 SessionEntry.ID 绑定，支持溯源回查。
