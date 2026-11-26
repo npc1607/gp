@@ -224,12 +224,19 @@ type openAIToolCallDelta struct {
 }
 
 type openAIUsage struct {
-	PromptTokens        int64 `json:"prompt_tokens"`
-	CompletionTokens    int64 `json:"completion_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
-	PromptTokensDetails *struct {
-		CachedTokens int64 `json:"cached_tokens"`
+	PromptTokens             int64 `json:"prompt_tokens"`
+	CompletionTokens         int64 `json:"completion_tokens"`
+	TotalTokens              int64 `json:"total_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	PromptCacheHitTokens     int64 `json:"prompt_cache_hit_tokens"`
+	PromptTokensDetails      *struct {
+		CachedTokens        int64 `json:"cached_tokens"`
+		CacheCreationTokens int64 `json:"cache_creation_tokens"`
 	} `json:"prompt_tokens_details,omitempty"`
+	InputTokensDetails *struct {
+		CachedTokens int64 `json:"cached_tokens"`
+	} `json:"input_tokens_details,omitempty"`
 }
 
 func (p *Provider) parseSSEStream(ctx context.Context, body io.ReadCloser, out chan<- ai.StreamChunk) {
@@ -286,13 +293,33 @@ func (p *Provider) parseSSEStream(ctx context.Context, body io.ReadCloser, out c
 func (p *Provider) dispatchSSEChunk(ctx context.Context, chunk *openAIStreamChunk, out chan<- ai.StreamChunk) {
 	// 1. Process usage if present (often in the terminal chunk with empty choices)
 	if chunk.Usage != nil {
-		usage := &ai.TokenUsage{
-			InputTokens:  chunk.Usage.PromptTokens,
-			OutputTokens: chunk.Usage.CompletionTokens,
-			TotalTokens:  chunk.Usage.TotalTokens,
-		}
+		var cacheRead, cacheWrite int64
 		if chunk.Usage.PromptTokensDetails != nil {
-			usage.CacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+			if chunk.Usage.PromptTokensDetails.CachedTokens > 0 {
+				cacheRead = chunk.Usage.PromptTokensDetails.CachedTokens
+			}
+			if chunk.Usage.PromptTokensDetails.CacheCreationTokens > 0 {
+				cacheWrite = chunk.Usage.PromptTokensDetails.CacheCreationTokens
+			}
+		}
+		if cacheRead == 0 && chunk.Usage.InputTokensDetails != nil && chunk.Usage.InputTokensDetails.CachedTokens > 0 {
+			cacheRead = chunk.Usage.InputTokensDetails.CachedTokens
+		}
+		if cacheRead == 0 && chunk.Usage.CacheReadInputTokens > 0 {
+			cacheRead = chunk.Usage.CacheReadInputTokens
+		}
+		if cacheRead == 0 && chunk.Usage.PromptCacheHitTokens > 0 {
+			cacheRead = chunk.Usage.PromptCacheHitTokens
+		}
+		if cacheWrite == 0 && chunk.Usage.CacheCreationInputTokens > 0 {
+			cacheWrite = chunk.Usage.CacheCreationInputTokens
+		}
+		usage := &ai.TokenUsage{
+			InputTokens:      chunk.Usage.PromptTokens,
+			OutputTokens:     chunk.Usage.CompletionTokens,
+			CacheReadTokens:  cacheRead,
+			CacheWriteTokens: cacheWrite,
+			TotalTokens:      chunk.Usage.TotalTokens,
 		}
 		select {
 		case out <- ai.StreamChunk{Usage: usage}:

@@ -350,9 +350,19 @@ func (p *Provider) readSSEStream(ctx context.Context, body io.ReadCloser, ch cha
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *struct {
-				PromptTokens     int64 `json:"prompt_tokens"`
-				CompletionTokens int64 `json:"completion_tokens"`
-				TotalTokens      int64 `json:"total_tokens"`
+				PromptTokens             int64 `json:"prompt_tokens"`
+				CompletionTokens         int64 `json:"completion_tokens"`
+				TotalTokens              int64 `json:"total_tokens"`
+				CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+				PromptCacheHitTokens     int64 `json:"prompt_cache_hit_tokens"`
+				PromptTokensDetails      *struct {
+					CachedTokens        int64 `json:"cached_tokens"`
+					CacheCreationTokens int64 `json:"cache_creation_tokens"`
+				} `json:"prompt_tokens_details"`
+				InputTokensDetails *struct {
+					CachedTokens int64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(innerStr), &chunk); err != nil {
@@ -399,10 +409,33 @@ func (p *Provider) readSSEStream(ctx context.Context, body io.ReadCloser, ch cha
 			}
 		}
 		if chunk.Usage != nil {
+			var cacheRead, cacheWrite int64
+			if chunk.Usage.PromptTokensDetails != nil {
+				if chunk.Usage.PromptTokensDetails.CachedTokens > 0 {
+					cacheRead = chunk.Usage.PromptTokensDetails.CachedTokens
+				}
+				if chunk.Usage.PromptTokensDetails.CacheCreationTokens > 0 {
+					cacheWrite = chunk.Usage.PromptTokensDetails.CacheCreationTokens
+				}
+			}
+			if cacheRead == 0 && chunk.Usage.InputTokensDetails != nil && chunk.Usage.InputTokensDetails.CachedTokens > 0 {
+				cacheRead = chunk.Usage.InputTokensDetails.CachedTokens
+			}
+			if cacheRead == 0 && chunk.Usage.CacheReadInputTokens > 0 {
+				cacheRead = chunk.Usage.CacheReadInputTokens
+			}
+			if cacheRead == 0 && chunk.Usage.PromptCacheHitTokens > 0 {
+				cacheRead = chunk.Usage.PromptCacheHitTokens
+			}
+			if cacheWrite == 0 && chunk.Usage.CacheCreationInputTokens > 0 {
+				cacheWrite = chunk.Usage.CacheCreationInputTokens
+			}
 			out.Usage = &ai.TokenUsage{
-				InputTokens:  chunk.Usage.PromptTokens,
-				OutputTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:  chunk.Usage.TotalTokens,
+				InputTokens:      chunk.Usage.PromptTokens,
+				OutputTokens:     chunk.Usage.CompletionTokens,
+				CacheReadTokens:  cacheRead,
+				CacheWriteTokens: cacheWrite,
+				TotalTokens:      chunk.Usage.TotalTokens,
 			}
 			hasData = true
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -535,5 +536,30 @@ func TestOpenAIProvider_TC_AI_004_ErrorStatus401(t *testing.T) {
 	}
 	if !strings.Contains(errStr, "Invalid API key") {
 		t.Errorf("%s(req=%+v): got error %q, want containing 'Invalid API key'", fn, req, errStr)
+	}
+}
+
+func TestOpenAIProvider_MapsExtendedCacheUsageFields(t *testing.T) {
+	p := NewProvider("k", "http://127.0.0.1:0/v1")
+	sse := "data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":4000,\"completion_tokens\":10,\"total_tokens\":4010,\"cache_read_input_tokens\":3200,\"cache_creation_input_tokens\":500}}\n\n" +
+		"data: {\"id\":\"2\",\"choices\":[],\"usage\":{\"prompt_tokens\":2000,\"completion_tokens\":5,\"total_tokens\":2005,\"prompt_cache_hit_tokens\":1536}}\n\n" +
+		"data: [DONE]\n"
+	out := make(chan ai.StreamChunk, 8)
+	p.parseSSEStream(context.Background(), io.NopCloser(strings.NewReader(sse)), out)
+
+	var usages []ai.TokenUsage
+	for c := range out {
+		if c.Usage != nil {
+			usages = append(usages, *c.Usage)
+		}
+	}
+	if len(usages) != 2 {
+		t.Fatalf("expected 2 usage chunks, got %d", len(usages))
+	}
+	if usages[0].CacheReadTokens != 3200 || usages[0].CacheWriteTokens != 500 {
+		t.Fatalf("unexpected anthropic/gateway cache mapping: %+v", usages[0])
+	}
+	if usages[1].CacheReadTokens != 1536 {
+		t.Fatalf("unexpected prompt_cache_hit_tokens mapping: %+v", usages[1])
 	}
 }

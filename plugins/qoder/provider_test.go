@@ -211,3 +211,62 @@ func TestQoderProvider_StreamChat_MockUpstream(t *testing.T) {
 		t.Fatalf("unexpected stream output: think=%q text=%q total=%d", gotThink, gotText, gotTotal)
 	}
 }
+
+func TestQoderProvider_MapsCacheUsageFields(t *testing.T) {
+	p := NewProvider("pt-mock-pat")
+	cases := []struct {
+		name           string
+		usageJSON      string
+		wantIn         int64
+		wantCacheRead  int64
+		wantCacheWrite int64
+	}{
+		{
+			name:          "prompt_tokens_details_cached_tokens",
+			usageJSON:     `{"prompt_tokens":180000,"completion_tokens":50,"total_tokens":180050,"prompt_tokens_details":{"cached_tokens":150000,"cache_creation_tokens":1200}}`,
+			wantIn:        180000,
+			wantCacheRead: 150000,
+			wantCacheWrite: 1200,
+		},
+		{
+			name:          "anthropic_or_gateway_cache_fields",
+			usageJSON:     `{"prompt_tokens":12000,"completion_tokens":40,"total_tokens":12040,"cache_read_input_tokens":9500,"cache_creation_input_tokens":2000}`,
+			wantIn:        12000,
+			wantCacheRead: 9500,
+			wantCacheWrite: 2000,
+		},
+		{
+			name:          "deepseek_prompt_cache_hit_tokens",
+			usageJSON:     `{"prompt_tokens":5000,"completion_tokens":20,"total_tokens":5020,"prompt_cache_hit_tokens":4096}`,
+			wantIn:        5000,
+			wantCacheRead: 4096,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := `{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":` + tc.usageJSON + `}`
+			outerBytes, _ := json.Marshal(map[string]any{"body": inner, "statusCodeValue": 200})
+			streamBody := "data: " + string(outerBytes) + "\ndata: [DONE]\n"
+
+			ch := make(chan ai.StreamChunk, 8)
+			p.readSSEStream(context.Background(), io.NopCloser(strings.NewReader(streamBody)), ch)
+
+			var gotUsage *ai.TokenUsage
+			for c := range ch {
+				if c.Error != nil {
+					t.Fatalf("unexpected error: %v", c.Error)
+				}
+				if c.Usage != nil {
+					gotUsage = c.Usage
+				}
+			}
+			if gotUsage == nil {
+				t.Fatal("expected non-nil Usage chunk")
+			}
+			if gotUsage.InputTokens != tc.wantIn || gotUsage.CacheReadTokens != tc.wantCacheRead || gotUsage.CacheWriteTokens != tc.wantCacheWrite {
+				t.Fatalf("got usage %+v, want in=%d read=%d write=%d", *gotUsage, tc.wantIn, tc.wantCacheRead, tc.wantCacheWrite)
+			}
+		})
+	}
+}
