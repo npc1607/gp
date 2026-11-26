@@ -499,3 +499,110 @@ func TestSqliteStorage_ContextMetricsCRUDAndTotals(t *testing.T) {
 		t.Fatalf("expected sess_b untouched, got %+v err=%v", totalsB, err)
 	}
 }
+
+func TestSqliteStorage_MigratesLegacyContextMetricsSchema(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy_pr1.db")
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	legacyDDL := `
+	CREATE TABLE context_metrics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL,
+		channel_id TEXT NOT NULL DEFAULT '',
+		turn_index INTEGER NOT NULL,
+		strategy_mode TEXT NOT NULL,
+		epoch_id INTEGER NOT NULL,
+		epoch_masked_count INTEGER NOT NULL,
+		ledger_version INTEGER NOT NULL,
+		ledger_active_cnt INTEGER NOT NULL,
+		ledger_superseded INTEGER NOT NULL,
+		ledger_hash TEXT NOT NULL,
+		context_build_ms REAL NOT NULL,
+		input_tokens INTEGER NOT NULL,
+		cache_read_tokens INTEGER NOT NULL,
+		cache_write_tokens INTEGER NOT NULL,
+		output_tokens INTEGER NOT NULL,
+		recall_calls INTEGER NOT NULL,
+		restore_calls INTEGER NOT NULL,
+		created_at TEXT NOT NULL
+	);
+	INSERT INTO context_metrics (
+		session_id, channel_id, turn_index, strategy_mode, epoch_id, epoch_masked_count,
+		ledger_version, ledger_active_cnt, ledger_superseded, ledger_hash,
+		context_build_ms, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+		recall_calls, restore_calls, created_at
+	) VALUES (
+		'legacy_sess', 'feishu:oc_old', 1, 'e4a_pr1', 3, 16,
+		1, 1, 0, 'abcd1234',
+		0.45, 50000, 40000, 0, 120,
+		1, 0, '2026-11-26T10:00:00Z'
+	);`
+	if _, err := rawDB.Exec(legacyDDL); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("seed legacy schema error = %v", err)
+	}
+	_ = rawDB.Close()
+
+	// Re-open with SqliteStorage.Open: must idempotently migrate missing PR #2 columns without data loss.
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open(legacy DB) error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Second Open pass must remain idempotent.
+	if err := store.initSchema(); err != nil {
+		t.Fatalf("idempotent initSchema retry error = %v", err)
+	}
+
+	ctx := context.Background()
+	if err := store.RecordContextMetric(ctx, &storage.ContextMetric{
+		SessionID:            "legacy_sess",
+		ChannelID:            "feishu:oc_old",
+		TurnIndex:            2,
+		StrategyMode:         "e4a_pr2",
+		EpochID:              4,
+		EpochMaskedCount:     16,
+		LedgerVersion:        1,
+		LedgerActiveCnt:      1,
+		LedgerSuperseded:     0,
+		LedgerHash:           "abcd1234",
+		WorkingSetTokens:     920,
+		WorkingSetEntries:    4,
+		RetrievalBuildMs:     1.85,
+		GraphMatchedEntities: 3,
+		ContextBuildMs:       2.10,
+		InputTokens:          42000,
+		CacheReadTokens:      39000,
+		OutputTokens:         150,
+		RecallCalls:          1,
+		RestoreCalls:         0,
+		SearchCalls:          2,
+	}); err != nil {
+		t.Fatalf("RecordContextMetric after migration error = %v", err)
+	}
+
+	rows, err := store.ListContextMetrics("legacy_sess", 10)
+	if err != nil {
+		t.Fatalf("ListContextMetrics error = %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows (1 legacy + 1 PR2), got %d", len(rows))
+	}
+	if rows[0].WorkingSetTokens != 920 || rows[0].WorkingSetEntries != 4 || rows[0].GraphMatchedEntities != 3 || rows[0].SearchCalls != 2 {
+		t.Fatalf("unexpected migrated row[0]: %+v", rows[0])
+	}
+	if rows[1].TurnIndex != 1 || rows[1].SearchCalls != 0 || rows[1].WorkingSetTokens != 0 {
+		t.Fatalf("unexpected legacy row[1]: %+v", rows[1])
+	}
+
+	totals, err := store.GetContextMetricTotals("legacy_sess")
+	if err != nil {
+		t.Fatalf("GetContextMetricTotals error = %v", err)
+	}
+	if totals.TurnCount != 2 || totals.TotalRecallCalls != 2 || totals.TotalSearchCalls != 2 {
+		t.Fatalf("unexpected totals: %+v", totals)
+	}
+}

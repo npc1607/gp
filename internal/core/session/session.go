@@ -436,6 +436,12 @@ func (s *SessionTree) GetBranchEntries() []LinearEntry {
 
 // GetLinearEntries 返回带 EntryID 指针的当前有效线性上下文（与 GetLinearContext 保持相同锚点截断语义）。
 func (s *SessionTree) GetLinearEntries() []LinearEntry {
+	entries, _, _ := s.GetLinearState()
+	return entries
+}
+
+// GetLinearState 返回当前线性上下文条目、锚点之前的历史工具调用轮次偏移量，以及最近压缩锚点 ID（无锚点时为空）。
+func (s *SessionTree) GetLinearState() ([]LinearEntry, int, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -464,7 +470,22 @@ func (s *SessionTree) GetLinearEntries() []LinearEntry {
 	slices.Reverse(tailAfterCompaction)
 
 	if anchor == nil {
-		return tailAfterCompaction
+		return tailAfterCompaction, 0, ""
+	}
+
+	toolTurnsBeforeAnchor := 0
+	walkID := anchor.ParentID
+	for walkID != "" {
+		entry, exists := s.entries[walkID]
+		if !exists {
+			break
+		}
+		if entry.Type == EntryMessage && entry.Message != nil {
+			if entry.Message.Role == ai.RoleAssistant && len(entry.Message.ToolCalls) > 0 {
+				toolTurnsBeforeAnchor++
+			}
+		}
+		walkID = entry.ParentID
 	}
 
 	var out []LinearEntry
@@ -477,14 +498,23 @@ func (s *SessionTree) GetLinearEntries() []LinearEntry {
 			},
 		})
 	}
+	keptToolTurns := 0
 	for _, m := range anchor.KeptMessages {
+		if m.Role == ai.RoleAssistant && len(m.ToolCalls) > 0 {
+			keptToolTurns++
+		}
 		out = append(out, LinearEntry{
 			EntryID: anchor.ID,
 			Message: m,
 		})
 	}
 	out = append(out, tailAfterCompaction...)
-	return out
+
+	priorToolTurnOffset := toolTurnsBeforeAnchor - keptToolTurns
+	if priorToolTurnOffset < 0 {
+		priorToolTurnOffset = 0
+	}
+	return out, priorToolTurnOffset, anchor.ID
 }
 
 // SwitchBranch 切换活跃分支（支持撤销与重试分支）

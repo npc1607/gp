@@ -54,32 +54,38 @@ type SessionDeleter interface {
 
 // ContextMetric 记录单轮模型请求的上下文组装与缓存可观测指标
 type ContextMetric struct {
-	ID               int64     `json:"id,omitempty"`
-	SessionID        string    `json:"session_id"`
-	ChannelID        string    `json:"channel_id"`
-	TurnIndex        int       `json:"turn_index"`
-	StrategyMode     string    `json:"strategy_mode"`
-	EpochID          int       `json:"epoch_id"`
-	EpochMaskedCount int       `json:"epoch_masked_count"`
-	LedgerVersion    int       `json:"ledger_version"`
-	LedgerActiveCnt  int       `json:"ledger_active_cnt"`
-	LedgerSuperseded int       `json:"ledger_superseded"`
-	LedgerHash       string    `json:"ledger_hash"`
-	ContextBuildMs   float64   `json:"context_build_ms"`
-	InputTokens      int64     `json:"input_tokens"`
-	CacheReadTokens  int64     `json:"cache_read_tokens"`
-	CacheWriteTokens int64     `json:"cache_write_tokens"`
-	OutputTokens     int64     `json:"output_tokens"`
-	RecallCalls      int       `json:"recall_calls"`
-	RestoreCalls     int       `json:"restore_calls"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID                   int64     `json:"id,omitempty"`
+	SessionID            string    `json:"session_id"`
+	ChannelID            string    `json:"channel_id"`
+	TurnIndex            int       `json:"turn_index"`
+	StrategyMode         string    `json:"strategy_mode"`
+	EpochID              int       `json:"epoch_id"`
+	EpochMaskedCount     int       `json:"epoch_masked_count"`
+	LedgerVersion        int       `json:"ledger_version"`
+	LedgerActiveCnt      int       `json:"ledger_active_cnt"`
+	LedgerSuperseded     int       `json:"ledger_superseded"`
+	LedgerHash           string    `json:"ledger_hash"`
+	WorkingSetTokens     int64     `json:"working_set_tokens"`
+	WorkingSetEntries    int       `json:"working_set_entries"`
+	RetrievalBuildMs     float64   `json:"retrieval_build_ms"`
+	GraphMatchedEntities int       `json:"graph_matched_entities"`
+	ContextBuildMs       float64   `json:"context_build_ms"`
+	InputTokens          int64     `json:"input_tokens"`
+	CacheReadTokens      int64     `json:"cache_read_tokens"`
+	CacheWriteTokens     int64     `json:"cache_write_tokens"`
+	OutputTokens         int64     `json:"output_tokens"`
+	RecallCalls          int       `json:"recall_calls"`
+	RestoreCalls         int       `json:"restore_calls"`
+	SearchCalls          int       `json:"search_calls"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
-// ContextMetricTotals 汇总指定会话的累计轮次与无损回查工具调用次数
+// ContextMetricTotals 汇总指定会话的累计轮次与无损回查/检索工具调用次数
 type ContextMetricTotals struct {
 	TurnCount         int `json:"turn_count"`
 	TotalRecallCalls  int `json:"total_recall_calls"`
 	TotalRestoreCalls int `json:"total_restore_calls"`
+	TotalSearchCalls  int `json:"total_search_calls"`
 }
 
 // ContextMetricStore 可选上下文可观测性指标读写接口

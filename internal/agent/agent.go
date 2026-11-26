@@ -10,6 +10,7 @@ import (
 
 	"gp/internal/ai"
 	"gp/internal/core/compaction"
+	"gp/internal/core/retrieval"
 	"gp/internal/core/session"
 	"gp/internal/core/storage"
 	"gp/internal/core/task"
@@ -75,8 +76,8 @@ type AgentInstance struct {
 	eventHandler  func(ev AgentEvent)
 	store         storage.Storage
 	taskTree             *task.OwnershipTree
-	systemPrompt         string
-	thinkingLevel        string
+	systemPrompt           string
+	thinkingLevel          string
 	contextWindow          int64
 	autoCompactThreshold   float64
 	observationMaskWindow  int
@@ -84,6 +85,24 @@ type AgentInstance struct {
 	channelID              string
 	contextLedger          *compaction.ContextLedger
 	lastPersistedLedgerVer int
+
+	workingSetEnabled     bool
+	workingSetBudgetRatio float64
+	workingSetMaxTokens   int
+	workingSetFloorRatio  float64
+	lastToolsTokens       int64
+
+	lastWSInitialized     bool
+	lastWSEpoch           int
+	lastWSAnchorID        string
+	lastWSUserEntryID     string
+	lastWSText            string
+	lastWSTokens          int64
+	lastWSEntries         int
+	lastWSMatchedEntities int
+
+	retrievalMu  sync.Mutex
+	retrievalIdx *retrieval.Index
 }
 
 func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *tools.Registry) *AgentInstance {
@@ -102,11 +121,17 @@ func NewAgent(id, roleName string, provider ai.Provider, modelName string, reg *
 		observationMaskEpoch:   defaultObservationMaskEpoch,
 		contextLedger:          compaction.NewContextLedger(),
 		lastPersistedLedgerVer: -1,
+		workingSetEnabled:      true,
+		workingSetBudgetRatio:  defaultWorkingSetBudgetRatio,
+		workingSetMaxTokens:    defaultWorkingSetMaxTokens,
+		workingSetFloorRatio:   defaultWorkingSetFloorRatio,
+		lastWSEpoch:            -1,
 	}
 	if reg != nil && len(reg.List()) > 0 {
 		for _, rt := range []tools.Tool{
 			&restoreObservationTool{agent: a},
 			&recallEntriesTool{agent: a},
+			&searchContextTool{agent: a},
 		} {
 			if _, exists := reg.Get(rt.Name()); !exists {
 				_ = reg.Register(rt)
@@ -259,6 +284,7 @@ func (a *AgentInstance) SetStorage(s storage.Storage) {
 	}
 	a.mu.Unlock()
 	a.loadPersistedContextLedger()
+	a.loadPersistedWorkingSet()
 }
 
 func (a *AgentInstance) GetStorage() storage.Storage {
@@ -296,8 +322,22 @@ func (a *AgentInstance) SetSessionTree(st *session.SessionTree) {
 	a.sessionTree = st
 	a.contextLedger = compaction.NewContextLedger()
 	a.lastPersistedLedgerVer = -1
+	a.lastWSInitialized = false
+	a.lastWSEpoch = -1
+	a.lastWSAnchorID = ""
+	a.lastWSUserEntryID = ""
+	a.lastWSText = ""
+	a.lastWSTokens = 0
+	a.lastWSEntries = 0
+	a.lastWSMatchedEntities = 0
 	a.mu.Unlock()
+
+	a.retrievalMu.Lock()
+	a.retrievalIdx = nil
+	a.retrievalMu.Unlock()
+
 	a.loadPersistedContextLedger()
+	a.loadPersistedWorkingSet()
 }
 
 // GetContextLedger 返回当前会话 L1 ContextLedger 的只读拷贝。

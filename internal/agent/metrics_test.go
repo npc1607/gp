@@ -139,7 +139,7 @@ func TestAgentLoop_PersistsContextMetricsAndLogsStructuredEvents(t *testing.T) {
 	if turn2.TurnIndex != 2 || turn2.RecallCalls != 0 || turn2.InputTokens != 1350 || turn2.CacheReadTokens != 1200 {
 		t.Fatalf("unexpected turn2 metric: %+v", turn2)
 	}
-	if turn2.ChannelID != "feishu:oc_test_chat" || turn2.StrategyMode != strategyModeE4APR1 {
+	if turn2.ChannelID != "feishu:oc_test_chat" || turn2.StrategyMode != strategyModeE4APR2 {
 		t.Fatalf("unexpected channel/strategy: %+v", turn2)
 	}
 	if turn2.LedgerVersion != 2 || turn2.LedgerActiveCnt != 1 || turn2.LedgerSuperseded != 1 || len(turn2.LedgerHash) != 8 {
@@ -161,8 +161,9 @@ func TestAgentLoop_PersistsContextMetricsAndLogsStructuredEvents(t *testing.T) {
 	if !strings.Contains(logs, "[ctx_metrics]") || !strings.Contains(logs, "ledger_hash="+turn2.LedgerHash) {
 		t.Fatalf("expected [ctx_metrics] structured log, got:\n%s", logs)
 	}
-	if !strings.Contains(logs, "sys_tokens=") || !strings.Contains(logs, "tools_tokens=") || !strings.Contains(logs, "ledger_tokens=") || !strings.Contains(logs, "msgs_tokens=") {
-		t.Fatalf("expected token distribution fields in [ctx_metrics], got:\n%s", logs)
+	if !strings.Contains(logs, "sys_tokens=") || !strings.Contains(logs, "tools_tokens=") || !strings.Contains(logs, "ledger_tokens=") || !strings.Contains(logs, "msgs_tokens=") ||
+		!strings.Contains(logs, "working_set_tokens=") || !strings.Contains(logs, "working_set_entries=") || !strings.Contains(logs, "retrieval_build_ms=") || !strings.Contains(logs, "graph_matched_entities=") || !strings.Contains(logs, "search_calls=") {
+		t.Fatalf("expected token distribution and PR #2 retrieval fields in [ctx_metrics], got:\n%s", logs)
 	}
 }
 

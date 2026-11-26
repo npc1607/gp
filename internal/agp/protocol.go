@@ -125,22 +125,27 @@ type ContextConstraintSummary struct {
 
 // ContextTurnMetric mirrors one persisted context_metrics turn row.
 type ContextTurnMetric struct {
-	TurnIndex        int     `json:"turn_index"`
-	StrategyMode     string  `json:"strategy_mode"`
-	EpochID          int     `json:"epoch_id"`
-	EpochMaskedCount int     `json:"epoch_masked_count"`
-	LedgerVersion    int     `json:"ledger_version"`
-	LedgerActiveCnt  int     `json:"ledger_active_cnt"`
-	LedgerSuperseded int     `json:"ledger_superseded"`
-	LedgerHash       string  `json:"ledger_hash"`
-	ContextBuildMs   float64 `json:"context_build_ms"`
-	InputTokens      int     `json:"input_tokens"`
-	CacheReadTokens  int     `json:"cache_read_tokens"`
-	CacheWriteTokens int     `json:"cache_write_tokens"`
-	OutputTokens     int     `json:"output_tokens"`
-	RecallCalls      int     `json:"recall_calls"`
-	RestoreCalls     int     `json:"restore_calls"`
-	CreatedAt        string  `json:"created_at,omitempty"`
+	TurnIndex            int     `json:"turn_index"`
+	StrategyMode         string  `json:"strategy_mode"`
+	EpochID              int     `json:"epoch_id"`
+	EpochMaskedCount     int     `json:"epoch_masked_count"`
+	LedgerVersion        int     `json:"ledger_version"`
+	LedgerActiveCnt      int     `json:"ledger_active_cnt"`
+	LedgerSuperseded     int     `json:"ledger_superseded"`
+	LedgerHash           string  `json:"ledger_hash"`
+	WorkingSetTokens     int64   `json:"working_set_tokens"`
+	WorkingSetEntries    int     `json:"working_set_entries"`
+	RetrievalBuildMs     float64 `json:"retrieval_build_ms"`
+	GraphMatchedEntities int     `json:"graph_matched_entities"`
+	ContextBuildMs       float64 `json:"context_build_ms"`
+	InputTokens          int     `json:"input_tokens"`
+	CacheReadTokens      int     `json:"cache_read_tokens"`
+	CacheWriteTokens     int     `json:"cache_write_tokens"`
+	OutputTokens         int     `json:"output_tokens"`
+	RecallCalls          int     `json:"recall_calls"`
+	RestoreCalls         int     `json:"restore_calls"`
+	SearchCalls          int     `json:"search_calls"`
+	CreatedAt            string  `json:"created_at,omitempty"`
 }
 
 // ContextStats carries read-only session context/cache observability data returned by ctx_stat.
@@ -163,6 +168,7 @@ type ContextStats struct {
 	RecentTurns           []ContextTurnMetric        `json:"recent_turns,omitempty"`
 	TotalRecallCalls      int                        `json:"total_recall_calls"`
 	TotalRestoreCalls     int                        `json:"total_restore_calls"`
+	TotalSearchCalls      int                        `json:"total_search_calls"`
 	TotalTurns            int                        `json:"total_turns"`
 }
 

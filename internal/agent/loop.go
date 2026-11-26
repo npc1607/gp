@@ -99,6 +99,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 		maxTurns = 500
 	}
 	toolsTokens := estimateToolsTokens(toolDefs)
+	a.setLastToolsTokens(toolsTokens)
 	baseTurnIdx := a.nextMetricTurnBase()
 
 	runStart := time.Now()
@@ -333,7 +334,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 		// 纯文本输出收敛退出
 		if len(finalToolCalls) == 0 {
-			a.recordTurnContextMetric(ctx, baseTurnIdx+turn+1, ctxMeta, latestUsage, 0, 0)
+			a.recordTurnContextMetric(ctx, baseTurnIdx+turn+1, ctxMeta, latestUsage, 0, 0, 0)
 			a.sessionTree.AppendMessage(ai.Message{
 				Role:              ai.RoleAssistant,
 				Content:           textDelta.String(),
@@ -361,13 +362,15 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 
 		a.SetStatus(StatusToolExecuting)
 
-		recallCalls, restoreCalls := 0, 0
+		recallCalls, restoreCalls, searchCalls := 0, 0, 0
 		for _, tc := range finalToolCalls {
 			switch tc.Function.Name {
 			case "recall_entries":
 				recallCalls++
 			case "restore_observation":
 				restoreCalls++
+			case "search_context":
+				searchCalls++
 			}
 		}
 
@@ -385,7 +388,7 @@ func runReActLoop(ctx context.Context, a *AgentInstance, sessTaskID string) (str
 				Timestamp:  time.Now(),
 			})
 		}
-		a.recordTurnContextMetric(ctx, baseTurnIdx+turn+1, ctxMeta, latestUsage, recallCalls, restoreCalls)
+		a.recordTurnContextMetric(ctx, baseTurnIdx+turn+1, ctxMeta, latestUsage, recallCalls, restoreCalls, searchCalls)
 	}
 
 	a.SetStatus(StatusSettled)

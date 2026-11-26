@@ -512,28 +512,34 @@ func (s *Server) handleContextStats(emit func(Event), req Request) {
 		if totals, err := metricStore.GetContextMetricTotals(effSessionID); err == nil {
 			stats.TotalRecallCalls = totals.TotalRecallCalls
 			stats.TotalRestoreCalls = totals.TotalRestoreCalls
+			stats.TotalSearchCalls = totals.TotalSearchCalls
 			stats.TotalTurns = totals.TurnCount
 		}
 		if recent, err := metricStore.ListContextMetrics(effSessionID, 5); err == nil {
 			stats.RecentTurns = make([]ContextTurnMetric, 0, len(recent))
 			for _, m := range recent {
 				stats.RecentTurns = append(stats.RecentTurns, ContextTurnMetric{
-					TurnIndex:        m.TurnIndex,
-					StrategyMode:     m.StrategyMode,
-					EpochID:          m.EpochID,
-					EpochMaskedCount: m.EpochMaskedCount,
-					LedgerVersion:    m.LedgerVersion,
-					LedgerActiveCnt:  m.LedgerActiveCnt,
-					LedgerSuperseded: m.LedgerSuperseded,
-					LedgerHash:       m.LedgerHash,
-					ContextBuildMs:   m.ContextBuildMs,
-					InputTokens:      int(m.InputTokens),
-					CacheReadTokens:  int(m.CacheReadTokens),
-					CacheWriteTokens: int(m.CacheWriteTokens),
-					OutputTokens:     int(m.OutputTokens),
-					RecallCalls:      m.RecallCalls,
-					RestoreCalls:     m.RestoreCalls,
-					CreatedAt:        m.CreatedAt.Local().Format("15:04:05"),
+					TurnIndex:            m.TurnIndex,
+					StrategyMode:         m.StrategyMode,
+					EpochID:              m.EpochID,
+					EpochMaskedCount:     m.EpochMaskedCount,
+					LedgerVersion:        m.LedgerVersion,
+					LedgerActiveCnt:      m.LedgerActiveCnt,
+					LedgerSuperseded:     m.LedgerSuperseded,
+					LedgerHash:           m.LedgerHash,
+					WorkingSetTokens:     m.WorkingSetTokens,
+					WorkingSetEntries:    m.WorkingSetEntries,
+					RetrievalBuildMs:     m.RetrievalBuildMs,
+					GraphMatchedEntities: m.GraphMatchedEntities,
+					ContextBuildMs:       m.ContextBuildMs,
+					InputTokens:          int(m.InputTokens),
+					CacheReadTokens:      int(m.CacheReadTokens),
+					CacheWriteTokens:     int(m.CacheWriteTokens),
+					OutputTokens:         int(m.OutputTokens),
+					RecallCalls:          m.RecallCalls,
+					RestoreCalls:         m.RestoreCalls,
+					SearchCalls:          m.SearchCalls,
+					CreatedAt:            m.CreatedAt.Local().Format("15:04:05"),
 				})
 			}
 		}

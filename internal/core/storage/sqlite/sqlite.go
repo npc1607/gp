@@ -116,6 +116,10 @@ func (s *SqliteStorage) initSchema() error {
 		ledger_active_cnt INTEGER NOT NULL,
 		ledger_superseded INTEGER NOT NULL,
 		ledger_hash TEXT NOT NULL,
+		working_set_tokens INTEGER NOT NULL DEFAULT 0,
+		working_set_entries INTEGER NOT NULL DEFAULT 0,
+		retrieval_build_ms REAL NOT NULL DEFAULT 0,
+		graph_matched_entities INTEGER NOT NULL DEFAULT 0,
 		context_build_ms REAL NOT NULL,
 		input_tokens INTEGER NOT NULL,
 		cache_read_tokens INTEGER NOT NULL,
@@ -123,12 +127,64 @@ func (s *SqliteStorage) initSchema() error {
 		output_tokens INTEGER NOT NULL,
 		recall_calls INTEGER NOT NULL,
 		restore_calls INTEGER NOT NULL,
+		search_calls INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_context_metrics_session ON context_metrics(session_id, id);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.ensureContextMetricsColumns()
+}
+
+func (s *SqliteStorage) ensureContextMetricsColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(context_metrics)`)
+	if err != nil {
+		return fmt.Errorf("inspect context_metrics columns: %w", err)
+	}
+	existing := make(map[string]struct{})
+	for rows.Next() {
+		var (
+			cid      int
+			name     string
+			ctype    string
+			notnull  int
+			dflt     sql.NullString
+			pk       int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan context_metrics column info: %w", err)
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+
+	migrations := []struct {
+		name string
+		def  string
+	}{
+		{name: "channel_id", def: "TEXT NOT NULL DEFAULT ''"},
+		{name: "working_set_tokens", def: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "working_set_entries", def: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "retrieval_build_ms", def: "REAL NOT NULL DEFAULT 0"},
+		{name: "graph_matched_entities", def: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "search_calls", def: "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, col := range migrations {
+		if _, ok := existing[col.name]; ok {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE context_metrics ADD COLUMN %s %s`, col.name, col.def)); err != nil {
+			return fmt.Errorf("migrate context_metrics add column %s: %w", col.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *SqliteStorage) Close() error {
@@ -526,13 +582,15 @@ func (s *SqliteStorage) RecordContextMetric(ctx context.Context, m *storage.Cont
 		INSERT INTO context_metrics (
 			session_id, channel_id, turn_index, strategy_mode, epoch_id, epoch_masked_count,
 			ledger_version, ledger_active_cnt, ledger_superseded, ledger_hash,
+			working_set_tokens, working_set_entries, retrieval_build_ms, graph_matched_entities,
 			context_build_ms, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
-			recall_calls, restore_calls, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			recall_calls, restore_calls, search_calls, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.SessionID, m.ChannelID, m.TurnIndex, m.StrategyMode, m.EpochID, m.EpochMaskedCount,
 		m.LedgerVersion, m.LedgerActiveCnt, m.LedgerSuperseded, m.LedgerHash,
+		m.WorkingSetTokens, m.WorkingSetEntries, m.RetrievalBuildMs, m.GraphMatchedEntities,
 		m.ContextBuildMs, m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens, m.OutputTokens,
-		m.RecallCalls, m.RestoreCalls, createdAt.Format(time.RFC3339Nano),
+		m.RecallCalls, m.RestoreCalls, m.SearchCalls, createdAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return fmt.Errorf("insert context_metric failed: %w", err)
@@ -555,8 +613,9 @@ func (s *SqliteStorage) ListContextMetrics(sessionID string, limit int) ([]stora
 	rows, err := s.db.Query(`
 		SELECT id, session_id, channel_id, turn_index, strategy_mode, epoch_id, epoch_masked_count,
 			ledger_version, ledger_active_cnt, ledger_superseded, ledger_hash,
+			working_set_tokens, working_set_entries, retrieval_build_ms, graph_matched_entities,
 			context_build_ms, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
-			recall_calls, restore_calls, created_at
+			recall_calls, restore_calls, search_calls, created_at
 		FROM context_metrics
 		WHERE session_id = ?
 		ORDER BY id DESC
@@ -577,9 +636,10 @@ func (s *SqliteStorage) ListContextMetrics(sessionID string, limit int) ([]stora
 		if err := rows.Scan(
 			&item.ID, &item.SessionID, &item.ChannelID, &item.TurnIndex, &item.StrategyMode,
 			&item.EpochID, &item.EpochMaskedCount, &item.LedgerVersion, &item.LedgerActiveCnt,
-			&item.LedgerSuperseded, &item.LedgerHash, &item.ContextBuildMs, &item.InputTokens,
+			&item.LedgerSuperseded, &item.LedgerHash, &item.WorkingSetTokens, &item.WorkingSetEntries,
+			&item.RetrievalBuildMs, &item.GraphMatchedEntities, &item.ContextBuildMs, &item.InputTokens,
 			&item.CacheReadTokens, &item.CacheWriteTokens, &item.OutputTokens,
-			&item.RecallCalls, &item.RestoreCalls, &createdAt,
+			&item.RecallCalls, &item.RestoreCalls, &item.SearchCalls, &createdAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan context_metric failed: %w", err)
 		}
@@ -591,18 +651,18 @@ func (s *SqliteStorage) ListContextMetrics(sessionID string, limit int) ([]stora
 	return out, rows.Err()
 }
 
-// GetContextMetricTotals 汇总指定会话的累计轮次与 recall_entries / restore_observation 调用次数
+// GetContextMetricTotals 汇总指定会话的累计轮次与 recall_entries / restore_observation / search_context 调用次数
 func (s *SqliteStorage) GetContextMetricTotals(sessionID string) (storage.ContextMetricTotals, error) {
 	if s.isClosed() {
 		return storage.ContextMetricTotals{}, fmt.Errorf("storage closed")
 	}
 	var totals storage.ContextMetricTotals
 	err := s.db.QueryRow(`
-		SELECT COUNT(*), COALESCE(SUM(recall_calls), 0), COALESCE(SUM(restore_calls), 0)
+		SELECT COUNT(*), COALESCE(SUM(recall_calls), 0), COALESCE(SUM(restore_calls), 0), COALESCE(SUM(search_calls), 0)
 		FROM context_metrics
 		WHERE session_id = ?`,
 		sessionID,
-	).Scan(&totals.TurnCount, &totals.TotalRecallCalls, &totals.TotalRestoreCalls)
+	).Scan(&totals.TurnCount, &totals.TotalRecallCalls, &totals.TotalRestoreCalls, &totals.TotalSearchCalls)
 	if err != nil {
 		return storage.ContextMetricTotals{}, fmt.Errorf("query context_metrics totals failed: %w", err)
 	}
