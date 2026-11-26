@@ -759,7 +759,7 @@ func isSafeSingleCommand(cmd string, isPipeSink bool, workDir string, allowAgent
 			}
 			if strings.HasPrefix(f, "/") || strings.HasPrefix(f, "~/") || f == "~" || strings.Contains(f, "..") {
 				abs := resolveTargetPath(f, workDir)
-				if !isTempPath(abs) && !isWithinWorkDir(abs, workDir) && !(allowAgentDirs && isAgentDirPath(abs, agentDirs)) {
+				if !isTempPath(abs) && !isWithinWorkDir(abs, workDir) && (!allowAgentDirs || !isAgentDirPath(abs, agentDirs)) {
 					return false
 				}
 			}
@@ -1016,7 +1016,7 @@ func (g *riskGuard) staticVerdict(toolName string, rawArgs json.RawMessage, work
 			}, true
 		}
 		isReadOnlyTool := lowerTool == "read" || lowerTool == "grep" || lowerTool == "find" || lowerTool == "ls"
-		if !isTempPath(absTarget) && !isWithinAllowedBoundary(absTarget, workDir, g.policy.AllowedDirs) && !(g.allowAgentDirFastPass() && isReadOnlyTool && isAgentDirPath(absTarget, g.agentDirs)) {
+		if !isTempPath(absTarget) && !isWithinAllowedBoundary(absTarget, workDir, g.policy.AllowedDirs) && (!g.allowAgentDirFastPass() || !isReadOnlyTool || !isAgentDirPath(absTarget, g.agentDirs)) {
 			if target == "" && len(g.policy.AllowedDirs) > 0 {
 				return &riskVerdict{
 					RiskLevel:  "high",
@@ -1057,11 +1057,6 @@ func (g *riskGuard) staticVerdict(toolName string, rawArgs json.RawMessage, work
 	return staticRiskVerdictWithAgentDirs(toolName, rawArgs, workDir, g.allowAgentDirFastPass(), g.agentDirs)
 }
 
-// staticRiskVerdict provides 0ms static classification for out-of-workspace access and unmistakably dangerous commands.
-func staticRiskVerdict(toolName string, rawArgs json.RawMessage, workDir string) (*riskVerdict, bool) {
-	return staticRiskVerdictWithAgentDirs(toolName, rawArgs, workDir, false, nil)
-}
-
 func staticRiskVerdictWithAgentDirs(toolName string, rawArgs json.RawMessage, workDir string, allowAgentDirs bool, agentDirs []string) (*riskVerdict, bool) {
 	lowerTool := strings.ToLower(strings.TrimSpace(toolName))
 
@@ -1072,7 +1067,7 @@ func staticRiskVerdictWithAgentDirs(toolName string, rawArgs json.RawMessage, wo
 		if target != "" {
 			absTarget := resolveTargetPath(target, workDir)
 			isReadOnly := lowerTool == "read" || lowerTool == "grep" || lowerTool == "find" || lowerTool == "ls"
-			if !isTempPath(absTarget) && !isWithinWorkDir(absTarget, workDir) && !(allowAgentDirs && isReadOnly && isAgentDirPath(absTarget, agentDirs)) {
+			if !isTempPath(absTarget) && !isWithinWorkDir(absTarget, workDir) && (!allowAgentDirs || !isReadOnly || !isAgentDirPath(absTarget, agentDirs)) {
 				return &riskVerdict{
 					RiskLevel:  "high",
 					Allow:      false,

@@ -36,7 +36,6 @@ func sseBody(events ...string) string {
 func drain(t *testing.T, ch <-chan ai.StreamChunk) (text, thinking string, calls map[int]*ai.ToolCall, finish string, usage *ai.TokenUsage) {
 	t.Helper()
 	calls = make(map[int]*ai.ToolCall)
-	var order []int
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected chunk error: %v", chunk.Error)
@@ -52,7 +51,6 @@ func drain(t *testing.T, ch <-chan ai.StreamChunk) (text, thinking string, calls
 			if !ok {
 				acc = &ai.ToolCall{Index: tc.Index}
 				calls[idx] = acc
-				order = append(order, idx)
 			}
 			if tc.ID != "" {
 				acc.ID = tc.ID

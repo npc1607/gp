@@ -67,14 +67,6 @@ func applyObservationMasking(messages []ai.Message, windowTurns int) []ai.Messag
 	return out
 }
 
-// applyEpochObservationMasking freezes the observation mask boundary at discrete Epoch strides
-// (default Epoch=16) so that within the same Epoch, earlier masked outputs stay byte-identical
-// and newly appended turns remain strictly Append-Only at the tail.
-func applyEpochObservationMasking(messages []ai.Message, epochStride, minRecentToolTurns int) []ai.Message {
-	out, _, _, _ := ApplyEpochObservationMaskingWithStats(messages, epochStride, minRecentToolTurns)
-	return out
-}
-
 // ApplyEpochObservationMaskingWithStats applies Epoch-frozen masking and returns the masked slice,
 // active epochID, freezeBoundary index, and number of folded tool outputs.
 func ApplyEpochObservationMaskingWithStats(messages []ai.Message, epochStride, minRecentToolTurns int) (out []ai.Message, epochID int, freezeBoundary int, maskedCount int) {

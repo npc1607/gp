@@ -375,12 +375,12 @@ func (l *ContextLedger) CanonicalRender() string {
 	var b strings.Builder
 	b.WriteString("[CONTEXT_LEDGER]\n")
 	for _, c := range active {
-		b.WriteString(fmt.Sprintf("- %s (%s): %s", c.ID, c.Category, c.Statement))
+		fmt.Fprintf(&b, "- %s (%s): %s", c.ID, c.Category, c.Statement)
 		if len(c.Provenance) > 0 {
-			b.WriteString(fmt.Sprintf(" [provenance:%s]", strings.Join(c.Provenance, ",")))
+			fmt.Fprintf(&b, " [provenance:%s]", strings.Join(c.Provenance, ","))
 		}
 		if len(c.Supersedes) > 0 {
-			b.WriteString(fmt.Sprintf(" (supersedes:%s)", strings.Join(c.Supersedes, ",")))
+			fmt.Fprintf(&b, " (supersedes:%s)", strings.Join(c.Supersedes, ","))
 		}
 		b.WriteByte('\n')
 	}

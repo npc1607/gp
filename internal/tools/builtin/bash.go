@@ -253,8 +253,10 @@ func startBashProgressSampler(cmdCtx context.Context, toolCtx *tools.ToolContext
 		return func() {}
 	}
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	var once sync.Once
 	go func() {
+		defer close(exited)
 		startedAt := time.Now()
 		lastChangeAt := startedAt
 		lastLen := 0
@@ -317,6 +319,9 @@ func startBashProgressSampler(cmdCtx context.Context, toolCtx *tools.ToolContext
 		}
 	}()
 	return func() {
-		once.Do(func() { close(done) })
+		once.Do(func() {
+			close(done)
+			<-exited
+		})
 	}
 }

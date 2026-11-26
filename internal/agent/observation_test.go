@@ -25,7 +25,7 @@ func TestObservationMaskingWindowAndSessionIntegrity(t *testing.T) {
 	largePayload := func(tag string, lines int) string {
 		var b strings.Builder
 		for i := 1; i <= lines; i++ {
-			b.WriteString(fmt.Sprintf("%s line %d: some verbose diagnostic output payload\n", tag, i))
+			fmt.Fprintf(&b, "%s line %d: some verbose diagnostic output payload\n", tag, i)
 		}
 		return strings.TrimRight(b.String(), "\n")
 	}
@@ -46,9 +46,10 @@ func TestObservationMaskingWindowAndSessionIntegrity(t *testing.T) {
 			}},
 		})
 		content := largePayload(fmt.Sprintf("turn%d", turn), 30)
-		if turn == 0 {
+		switch turn {
+		case 0:
 			content = turn0Text
-		} else if turn == 1 {
+		case 1:
 			content = "ok"
 		}
 		st.AppendMessage(ai.Message{
