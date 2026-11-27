@@ -200,6 +200,7 @@ func (p *Provider) buildBody(authInfo *exchangedAuth, req *ai.ChatRequest, model
 	for _, rawT := range req.Tools {
 		var parsed any
 		if json.Unmarshal(rawT, &parsed) == nil {
+			ai.SanitizeToolDefinition(parsed)
 			tools = append(tools, parsed)
 		}
 	}

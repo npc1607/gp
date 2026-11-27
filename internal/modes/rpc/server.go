@@ -602,12 +602,15 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 	apiKey := s.resolveAPIKey(cfg)
 
 	authStore := auth.NewStore(homeDir)
-	inferred := auth.InferProviderFromModel(modelName)
-	if inferred != "" && apiKey == "" {
-		if k, u, _, ok := authStore.ResolveCredential(inferred); ok {
-			apiKey = k
-			if u != "" {
-				baseURL = u
+	inferred := authStore.ResolveProviderForModel(modelName)
+	if inferred != "" {
+		explicitKey := s.opts.APIKey != "" || (cfg != nil && cfg.APIKey != "")
+		if apiKey == "" || !explicitKey {
+			if k, u, _, ok := authStore.ResolveCredential(inferred); ok {
+				apiKey = k
+				if u != "" {
+					baseURL = u
+				}
 			}
 		}
 	}
@@ -622,7 +625,7 @@ func (s *Server) handleRun(ctx context.Context, emit func(Event), req Request) {
 		prov = s.providers[provKey]
 		s.mu.Unlock()
 		if prov == nil {
-			prov = ai.CreateProviderFromPlugins("", apiKey, baseURL, modelName)
+			prov = ai.CreateProviderFromPlugins(inferred, apiKey, baseURL, modelName)
 			if prov == nil {
 				prov = openai.NewProvider(apiKey, baseURL)
 			}

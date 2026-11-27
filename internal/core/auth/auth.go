@@ -429,6 +429,45 @@ func InferProviderFromModel(model string) string {
 	return ai.InferPluginByModel(model)
 }
 
+// ResolveProviderForModel 结合显式前缀、SQLite auth_models 缓存目录与静态规则解析模型所属 Provider。
+// 优先匹配已登录（有可用凭证）的 Provider，避免动态模型（如 Qoder 拉取的线上模型）在重启后退回 OpenAI。
+func (s *Store) ResolveProviderForModel(model string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return ""
+	}
+	if idx := strings.Index(m, "/"); idx > 0 {
+		prefix := NormalizeProviderID(m[:idx])
+		if _, ok := FindProviderSpec(prefix); ok {
+			return prefix
+		}
+	}
+	if s != nil {
+		if db, err := s.ensureDB(); err == nil {
+			var candidates []string
+			rows, err := db.Query(`SELECT provider_id FROM auth_models WHERE model_id = ? ORDER BY rowid ASC`, m)
+			if err == nil {
+				for rows.Next() {
+					var pid string
+					if err := rows.Scan(&pid); err == nil && pid != "" {
+						candidates = append(candidates, NormalizeProviderID(pid))
+					}
+				}
+				_ = rows.Close()
+			}
+			for _, norm := range candidates {
+				if _, _, _, ok := s.ResolveCredential(norm); ok {
+					return norm
+				}
+			}
+			if len(candidates) > 0 {
+				return candidates[0]
+			}
+		}
+	}
+	return InferProviderFromModel(m)
+}
+
 // ListModels 零网络阻塞地从 SQLite 缓存与已挂载插件目录汇总可用模型（打开 /model 毫秒级响应）
 func (s *Store) ListModels(currentModel, activeBaseURL, activeAPIKey string) []ModelEntry {
 	var entries []ModelEntry

@@ -69,3 +69,23 @@ func TestAuthStore_LoginLogoutAndAliases(t *testing.T) {
 		t.Fatalf("expected qoder credential removed after logout")
 	}
 }
+
+func TestStore_ResolveProviderForModel_DynamicCachedModel(t *testing.T) {
+	home := t.TempDir()
+	store := NewStore(home)
+
+	// 模拟 Qoder 已登录且动态拉取缓存了一个不在静态白名单里的模型 ID
+	if err := store.Set("qoder", Credential{Type: "api_key", Key: "pt-qoder-secret"}); err != nil {
+		t.Fatalf("Set(qoder) failed: %v", err)
+	}
+	if err := store.SaveProviderModels("qoder", []string{"qwen3-coder-next", "custom-dynamic-model"}); err != nil {
+		t.Fatalf("SaveProviderModels(qoder) failed: %v", err)
+	}
+
+	if got := store.ResolveProviderForModel("qwen3-coder-next"); got != "qoder" {
+		t.Fatalf("ResolveProviderForModel(dynamic qoder model) = %q, want %q", got, "qoder")
+	}
+	if got := store.ResolveProviderForModel("qoder/custom-dynamic-model"); got != "qoder" {
+		t.Fatalf("ResolveProviderForModel(prefixed model) = %q, want %q", got, "qoder")
+	}
+}

@@ -78,11 +78,15 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 	modelName := r.resolveModelName(cfg)
 	baseURL := r.resolveBaseURL(cfg)
 	apiKey := r.resolveAPIKey(cfg)
-	if inferred := auth.InferProviderFromModel(modelName); inferred != "" && apiKey == "" {
-		if k, u, _, ok := authStore.ResolveCredential(inferred); ok {
-			apiKey = k
-			if u != "" {
-				baseURL = u
+	inferred := authStore.ResolveProviderForModel(modelName)
+	if inferred != "" {
+		explicitKey := r.opts.APIKey != "" || (cfg != nil && cfg.APIKey != "")
+		if apiKey == "" || !explicitKey {
+			if k, u, _, ok := authStore.ResolveCredential(inferred); ok {
+				apiKey = k
+				if u != "" {
+					baseURL = u
+				}
 			}
 		}
 	}
@@ -94,7 +98,7 @@ func (r *Runner) Run(ctx context.Context, prompt string) error {
 
 	prov := r.opts.Provider
 	if prov == nil {
-		prov = ai.CreateProviderFromPlugins("", apiKey, baseURL, modelName)
+		prov = ai.CreateProviderFromPlugins(inferred, apiKey, baseURL, modelName)
 		if prov == nil {
 			prov = openai.NewProvider(apiKey, baseURL)
 		}

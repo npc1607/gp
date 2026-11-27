@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"gp/internal/ai"
 	"gp/internal/tools"
 )
 
@@ -44,7 +45,7 @@ func (m *MCPTool) Description() string {
 
 func (m *MCPTool) InputSchema() json.RawMessage {
 	if len(m.toolDef.InputSchema) > 0 {
-		return m.toolDef.InputSchema
+		return ai.SanitizeToolSchema(m.toolDef.InputSchema)
 	}
 	return json.RawMessage(`{"type":"object"}`)
 }

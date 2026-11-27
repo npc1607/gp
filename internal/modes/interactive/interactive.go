@@ -90,18 +90,22 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 	baseURL := r.resolveBaseURL(cfg)
 	apiKey := r.resolveAPIKey(cfg)
 
-	if inferredProv := auth.InferProviderFromModel(modelName); inferredProv != "" && apiKey == "" {
-		if k, u, _, ok := authStore.ResolveCredential(inferredProv); ok {
-			apiKey = k
-			if u != "" {
-				baseURL = u
+	inferredProv := authStore.ResolveProviderForModel(modelName)
+	if inferredProv != "" {
+		explicitKey := r.opts.APIKey != "" || (cfg != nil && cfg.APIKey != "")
+		if apiKey == "" || !explicitKey {
+			if k, u, _, ok := authStore.ResolveCredential(inferredProv); ok {
+				apiKey = k
+				if u != "" {
+					baseURL = u
+				}
 			}
 		}
 	}
 
 	prov := r.opts.Provider
 	if prov == nil {
-		prov = ai.CreateProviderFromPlugins("", apiKey, baseURL, modelName)
+		prov = ai.CreateProviderFromPlugins(inferredProv, apiKey, baseURL, modelName)
 		if prov == nil {
 			prov = openai.NewProvider(apiKey, baseURL)
 		}
@@ -289,6 +293,31 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 					InputTokens:  ev.Usage.InputTokens,
 					OutputTokens: ev.Usage.OutputTokens,
 					TotalTokens:  ev.Usage.TotalTokens,
+				})
+			}
+		case agent.EventContextMetrics:
+			if ev.ContextMetric != nil {
+				cm := ev.ContextMetric
+				p.Send(tui.ContextMetricsMsg{
+					TurnIndex:            cm.TurnIndex,
+					StrategyMode:         cm.StrategyMode,
+					EpochID:              cm.EpochID,
+					EpochMaskedCount:     cm.EpochMaskedCount,
+					LedgerVersion:        cm.LedgerVersion,
+					LedgerActiveCnt:      cm.LedgerActiveCnt,
+					LedgerSuperseded:     cm.LedgerSuperseded,
+					WorkingSetTokens:     cm.WorkingSetTokens,
+					WorkingSetEntries:    cm.WorkingSetEntries,
+					GraphMatchedEntities: cm.GraphMatchedEntities,
+					ContextBuildMs:       cm.ContextBuildMs,
+					RetrievalBuildMs:     cm.RetrievalBuildMs,
+					InputTokens:          cm.InputTokens,
+					CacheReadTokens:      cm.CacheReadTokens,
+					CacheWriteTokens:     cm.CacheWriteTokens,
+					OutputTokens:         cm.OutputTokens,
+					RecallCalls:          cm.RecallCalls,
+					RestoreCalls:         cm.RestoreCalls,
+					SearchCalls:          cm.SearchCalls,
 				})
 			}
 		}
@@ -507,7 +536,33 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		}
 		return nil
 	})
+	activeProvID := auth.NormalizeProviderID(inferredProv)
+	activeModel := modelName
+	activeKey := apiKey
+	activeURL := baseURL
+
+	uiModel.SetAuthChangeHandler(func(providerID string) {
+		norm := auth.NormalizeProviderID(providerID)
+		if norm == "" || (activeProvID != "" && norm != activeProvID) {
+			return
+		}
+		if newKey, newURL, _, ok := authStore.ResolveCredential(norm); ok {
+			if newURL == "" {
+				newURL = baseURL
+			}
+			if p := ai.CreateProviderFromPlugins(norm, newKey, newURL, activeModel); p != nil {
+				ag.SetProvider(p)
+			} else if newKey != "" || newURL != "" {
+				ag.SetProvider(openai.NewProvider(newKey, newURL))
+			}
+			activeProvID = norm
+			activeKey = newKey
+			activeURL = newURL
+		}
+	})
+
 	uiModel.SetModelChangeHandler(func(entry auth.ModelEntry, persist bool) error {
+		targetProv := auth.NormalizeProviderID(entry.Provider)
 		newKey, newURL, _, ok := authStore.ResolveCredential(entry.Provider)
 		if !ok {
 			if apiKey != "" && (entry.BaseURL == "" || entry.BaseURL == baseURL) {
@@ -524,10 +579,18 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			newURL = baseURL
 		}
 		ag.SetModelName(entry.ID)
-		if p := ai.CreateProviderFromPlugins(entry.Provider, newKey, newURL, entry.ID); p != nil {
-			ag.SetProvider(p)
-		} else if newKey != "" || newURL != "" {
-			ag.SetProvider(openai.NewProvider(newKey, newURL))
+		activeModel = entry.ID
+		// 同 Provider 且凭证未变时复用已有 Provider 实例，保留已缓存的 jobToken / 连接池，避免反复触发 PAT 兑换
+		sameProvider := targetProv != "" && targetProv == activeProvID && newKey == activeKey && newURL == activeURL
+		if !sameProvider {
+			if p := ai.CreateProviderFromPlugins(entry.Provider, newKey, newURL, entry.ID); p != nil {
+				ag.SetProvider(p)
+			} else if newKey != "" || newURL != "" {
+				ag.SetProvider(openai.NewProvider(newKey, newURL))
+			}
+			activeProvID = targetProv
+			activeKey = newKey
+			activeURL = newURL
 		}
 		if persist {
 			mgr := r.opts.SettingsMgr
