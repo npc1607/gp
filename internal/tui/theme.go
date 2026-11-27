@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"fmt"
+	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -105,6 +108,88 @@ func (t Theme) BoldFg(c lipgloss.Color, s string) string {
 
 func (t Theme) ItalicFg(c lipgloss.Color, s string) string {
 	return lipgloss.NewStyle().Foreground(c).Italic(true).Render(s)
+}
+
+// ── TrueColor Animation Helpers (Breathing & Shimmer) ───────────────────────
+
+func parseHexRGB(c lipgloss.Color) (int, int, int, bool) {
+	s := strings.TrimPrefix(strings.TrimSpace(string(c)), "#")
+	if len(s) != 6 {
+		return 0, 0, 0, false
+	}
+	v, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff), true
+}
+
+// LerpColor 在两个十六进制 TrueColor 之间做线性插值 (t ∈ [0, 1])
+func LerpColor(from, to lipgloss.Color, ratio float64) lipgloss.Color {
+	if ratio <= 0 {
+		return from
+	}
+	if ratio >= 1 {
+		return to
+	}
+	r1, g1, b1, ok1 := parseHexRGB(from)
+	r2, g2, b2, ok2 := parseHexRGB(to)
+	if !ok1 || !ok2 {
+		if ratio >= 0.5 {
+			return to
+		}
+		return from
+	}
+	r := int(math.Round(float64(r1) + float64(r2-r1)*ratio))
+	g := int(math.Round(float64(g1) + float64(g2-g1)*ratio))
+	b := int(math.Round(float64(b1) + float64(b2-b1)*ratio))
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b))
+}
+
+// BreathingFactor 返回平滑正弦呼吸曲线值 [0, 1]
+func BreathingFactor(tick int, periodTicks float64) float64 {
+	if periodTicks <= 0 {
+		periodTicks = 48
+	}
+	phase := 2 * math.Pi * float64(tick) / periodTicks
+	return 0.5 - 0.5*math.Cos(phase)
+}
+
+// RenderShimmerText 渲染从左向右柔和扫光的文字（30fps 驱动）
+func RenderShimmerText(text string, base, peak lipgloss.Color, tick int, bold bool) string {
+	runes := []rune(text)
+	n := len(runes)
+	if n == 0 {
+		return ""
+	}
+	// 每 54 帧 (~1.8s) 完整扫光一次，末尾留短暂停顿，避免视觉急促
+	const cycle = 54
+	pos := float64(tick%cycle) / float64(cycle-12)
+	center := -2.5 + pos*(float64(n)+5.0)
+	const sigma = 1.9
+
+	var sb strings.Builder
+	for i, r := range runes {
+		dist := float64(i) - center
+		intensity := math.Exp(-(dist * dist) / (2 * sigma * sigma))
+		if intensity < 0.03 {
+			intensity = 0
+		}
+		col := LerpColor(base, peak, intensity)
+		st := lipgloss.NewStyle().Foreground(col)
+		if bold && intensity > 0.55 {
+			st = st.Bold(true)
+		}
+		sb.WriteString(st.Render(string(r)))
+	}
+	return sb.String()
+}
+
+// RenderBreathingDot 渲染克制的明暗呼吸指示点（用于 Transcript 视觉去重）
+func RenderBreathingDot(base, peak lipgloss.Color, tick int) string {
+	ratio := 0.25 + 0.75*BreathingFactor(tick, 44)
+	col := LerpColor(base, peak, ratio)
+	return lipgloss.NewStyle().Foreground(col).Render("●")
 }
 
 func (t Theme) ToolBorderColor(toolName string, pending, isErr bool) lipgloss.Color {
@@ -273,7 +358,7 @@ func ThinkingIcon(icons bool) string {
 	if !icons {
 		return ""
 	}
-	return "🧠"
+	return "◇"
 }
 
 func CopyChip(icons bool) string {

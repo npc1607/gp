@@ -24,9 +24,10 @@ const (
 	OverlayResumeSelect
 	OverlaySkillsSelect
 	OverlayMCPSelect
+	OverlayStatuslineSelect
 )
 
-// OverlayState 管理 /model、/login、/logout、/skills、/mcp 的交互式选择与输入状态
+// OverlayState 管理 /model、/login、/logout、/skills、/mcp、/statusline 的交互式选择与输入状态
 type OverlayState struct {
 	Kind        OverlayKind
 	Cursor      int
@@ -40,6 +41,7 @@ type OverlayState struct {
 	Sessions    []storage.SessionSummary
 	Skills          []SkillStatusItem
 	MCPs            []MCPStatusItem
+	Segments        []StatusSegment
 	ThinkingLevel   string
 	ThinkingOptions []ai.ThinkingOption
 	StatusNote      string
@@ -314,6 +316,9 @@ func RenderOverlay(o *OverlayState, width int, activeModel string, store *auth.S
 
 	case OverlayMCPSelect:
 		title, lines = renderMCPOverlayLines(o, innerW, t)
+
+	case OverlayStatuslineSelect:
+		title, lines = renderStatuslineOverlayLines(o, innerW, t)
 	}
 
 	padded := make([]string, len(lines))
@@ -343,6 +348,8 @@ func (m *MainUIModel) HandleOverlayKey(msg tea.KeyMsg) bool {
 		return m.handleSkillsOverlayKey(msg)
 	case OverlayMCPSelect:
 		return m.handleMCPOverlayKey(msg)
+	case OverlayStatuslineSelect:
+		return m.handleStatuslineOverlayKey(msg)
 	case OverlayModelSelect:
 		filtered := m.overlay.filteredModels()
 		switch key {

@@ -131,6 +131,6 @@ func wrapTopList(label string, items []string, limit, maxW int) []string {
 func (m *MainUIModel) ShowStartupBanner(s StartupSummary) {
 	if buf, ok := m.agentBuffers[PrimaryAgentID]; ok {
 		buf.Transcript.AddNotice(RenderStartupBanner(s, m.width, m.theme))
-		buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+		buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 	}
 }

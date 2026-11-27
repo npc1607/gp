@@ -131,7 +131,7 @@ func RegisterDefaultKeybindings(km *KeymapRegistry) {
 		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
 			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 				activeBuf.Transcript.ToggleAllExpanded()
-				activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
+				activeBuf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), false)
 			}
 			return nil, true
 		},
@@ -146,7 +146,7 @@ func RegisterDefaultKeybindings(km *KeymapRegistry) {
 		Handler: func(m *MainUIModel) (tea.Cmd, bool) {
 			if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 				activeBuf.Transcript.ToggleLatestThinking()
-				activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
+				activeBuf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), false)
 			}
 			return nil, true
 		},

@@ -266,3 +266,120 @@ func (m *MainUIModel) handleMCPOverlayKey(msg tea.KeyMsg) bool {
 	}
 	return true
 }
+
+func (o *OverlayState) filteredSegments() []StatusSegment {
+	q := strings.ToLower(strings.TrimSpace(o.SearchQuery))
+	if q == "" {
+		return o.Segments
+	}
+	var out []StatusSegment
+	for _, s := range o.Segments {
+		if strings.Contains(strings.ToLower(s.ID), q) ||
+			strings.Contains(strings.ToLower(s.Description), q) ||
+			strings.Contains(strings.ToLower(s.Side), q) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func renderStatuslineOverlayLines(o *OverlayState, innerW int, t Theme) (string, []string) {
+	enabledCnt := 0
+	for _, s := range o.Segments {
+		if s.Enabled {
+			enabledCnt++
+		}
+	}
+	title := t.BoldFg(t.Accent, fmt.Sprintf("Statusline Segments (%d/%d on)", enabledCnt, len(o.Segments)))
+	var lines []string
+	searchRow := t.Fg(t.Muted, "Search: ") + t.Fg(t.Text, o.SearchQuery) + t.BoldFg(t.Accent, "▌")
+	lines = append(lines, ClipToWidth(searchRow, innerW, "…"))
+	lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
+
+	filtered := o.filteredSegments()
+	if len(filtered) == 0 {
+		lines = append(lines, t.Fg(t.Muted, "  (no matching statusline segments)"))
+	} else {
+		maxShow := 10
+		start := 0
+		if o.Cursor >= maxShow {
+			start = o.Cursor - maxShow + 1
+		}
+		end := min(start+maxShow, len(filtered))
+		for i := start; i < end; i++ {
+			s := filtered[i]
+			sel := "  "
+			if i == o.Cursor {
+				sel = t.BoldFg(t.Accent, "› ")
+			}
+			mark := t.Fg(t.Muted, "[ ] ")
+			if s.Enabled {
+				mark = t.Fg(t.Success, "[x] ")
+			}
+			nameStr := t.Fg(t.Text, s.ID)
+			if i == o.Cursor {
+				nameStr = t.BoldFg(t.Accent, s.ID)
+			}
+			right := t.Fg(t.Muted, fmt.Sprintf("[%s · p%d]", s.Side, s.Priority))
+			left := sel + mark + nameStr
+			if desc := strings.TrimSpace(s.Description); desc != "" {
+				left += "  " + t.Fg(t.Muted, desc)
+			}
+			lines = append(lines, composeLeftRight(left, right, innerW))
+		}
+	}
+	if o.StatusNote != "" {
+		lines = append(lines, t.Fg(t.Warning, ClipToWidth(o.StatusNote, innerW, "…")))
+	}
+	lines = append(lines, t.Fg(t.BorderMuted, strings.Repeat("─", innerW)))
+	lines = append(lines, t.Fg(t.Dim, "↑/↓ move · Space toggle · Ctrl+R reset · Type to filter · Enter/Esc close"))
+	return title, lines
+}
+
+func (m *MainUIModel) handleStatuslineOverlayKey(msg tea.KeyMsg) bool {
+	filtered := m.overlay.filteredSegments()
+	key := msg.String()
+	switch key {
+	case "up":
+		if m.overlay.Cursor > 0 {
+			m.overlay.Cursor--
+		}
+	case "down":
+		if m.overlay.Cursor < len(filtered)-1 {
+			m.overlay.Cursor++
+		}
+	case "backspace":
+		rs := []rune(m.overlay.SearchQuery)
+		if len(rs) > 0 {
+			m.overlay.SearchQuery = string(rs[:len(rs)-1])
+			m.overlay.Cursor = 0
+		}
+	case " ":
+		if m.footer != nil && m.overlay.Cursor >= 0 && m.overlay.Cursor < len(filtered) {
+			chosen := filtered[m.overlay.Cursor]
+			en, ok := m.footer.ToggleSegment(chosen.ID)
+			if ok {
+				m.overlay.Segments = m.footer.ListSegments()
+				state := "off"
+				if en {
+					state = "on"
+				}
+				m.overlay.StatusNote = fmt.Sprintf("Segment %q -> %s", chosen.ID, state)
+			}
+		}
+	case "ctrl+r":
+		if m.footer != nil {
+			m.footer.ResetSegments()
+			m.overlay.Segments = m.footer.ListSegments()
+			m.overlay.StatusNote = "Reset all statusline segments to defaults"
+		}
+	case "enter":
+		m.overlay.Close()
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.overlay.SearchQuery += string(msg.Runes)
+			m.overlay.Cursor = 0
+		}
+	}
+	return true
+}

@@ -850,6 +850,14 @@ func (a *AgentInstance) recordTurnContextMetric(
 		"restore_calls", metric.RestoreCalls,
 		"search_calls", metric.SearchCalls,
 	)
+
+	a.EmitEvent(AgentEvent{
+		Type:          EventContextMetrics,
+		AgentID:       a.id,
+		Turn:          turnIndex,
+		ContextMetric: metric,
+		Timestamp:     metric.CreatedAt,
+	})
 }
 
 func (a *AgentInstance) maybeAutoCompactWithMeta(ctx context.Context, messages []ai.Message, toolsTokens int64) ([]ai.Message, assemblyMeta, bool) {

@@ -15,6 +15,7 @@ import (
 	_ "gp/plugins/qoder"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // createTestMainUIModel 为单元测试创建标准 MainUIModel 实例
@@ -725,8 +726,8 @@ func TestTUI_PiZentui_EditorWorkingLineAndFooter(t *testing.T) {
 	_, _ = m.Update(ToolCallStartMsg{AgentID: PrimaryAgentID, CallID: "c1", ToolName: "bash", ArgsRaw: `{"command":"go test"}`})
 	_, _ = m.Update(TokenUsageMsg{InputTokens: 1200, OutputTokens: 350, TotalTokens: 1550})
 
-	view := m.View()
-	if !strings.Contains(view, "Simmering…") || !strings.Contains(view, "(bash)") {
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Running…") || !strings.Contains(view, "(bash)") {
 		t.Fatalf("expected working line embedded in opencode editor border, got:\n%s", view)
 	}
 	if !strings.Contains(view, "ctx: 1.6k/1.00M") || !strings.Contains(view, "↑1.2k ↓350") {
@@ -741,6 +742,284 @@ func TestTUI_PiZentui_EditorWorkingLineAndFooter(t *testing.T) {
 	}
 	if got := m.Config().FooterStyle; got != "hidden" {
 		t.Fatalf("expected hidden footer style after /zentui preset minimalist, got %q", got)
+	}
+}
+
+func TestTUI_ThinkingAnimationShimmerAndTailPreview(t *testing.T) {
+	th := DefaultTheme()
+	cfg := DefaultUIConfig()
+
+	// 1. 去 emoji：ThinkingIcon 应返回克制的几何符号 ◇
+	if ic := ThinkingIcon(true); ic != "◇" {
+		t.Fatalf("expected monochrome geometric thinking icon ◇, got %q", ic)
+	}
+
+	// 2. 对称回弹星芒序列（ping-pong）
+	frames := WorkingSpinners["claude-inspired"]
+	if len(frames) < 10 || frames[0] != "·" || frames[5] != "✽" || frames[len(frames)-1] != "✢" {
+		t.Fatalf("expected ping-pong claude-inspired frames, got %v", frames)
+	}
+
+	// 3. Shimmer 文字保留完整字符内容
+	shimmer := ansi.Strip(RenderShimmerText("Thinking…", th.Muted, th.Thinking, 12, true))
+	if shimmer != "Thinking…" {
+		t.Fatalf("expected shimmer text to preserve runes, got %q", shimmer)
+	}
+
+	// 4. 思考进行中应展示尾部实时摘要（tail preview）+ 呼吸点，结束后收束为 ◇ thought + 开头摘要
+	st := &TurnStep{
+		Kind:           "thinking",
+		Thinking:       "First sentence about project layout and initial hypothesis, then diving deeper into the final root cause of the bug",
+		ThinkStartedAt: time.Now().Add(-1500 * time.Millisecond),
+	}
+	pulse := RenderBreathingDot(th.BorderMuted, th.Thinking, 10)
+	liveLines := renderThinkingStep(st, 60, th, cfg, true, pulse)
+	livePlain := ansi.Strip(strings.Join(liveLines, "\n"))
+	if !strings.Contains(livePlain, "●") || !strings.Contains(livePlain, "thinking") {
+		t.Fatalf("expected breathing dot and thinking label while active, got:\n%s", livePlain)
+	}
+	if !strings.Contains(livePlain, "root cause of the bug") || !strings.Contains(livePlain, "… ") {
+		t.Fatalf("expected tail-scrolling preview while active thinking, got:\n%s", livePlain)
+	}
+
+	st.ThinkDur = 2 * time.Second
+	doneLines := renderThinkingStep(st, 60, th, cfg, false, pulse)
+	donePlain := ansi.Strip(strings.Join(doneLines, "\n"))
+	if !strings.Contains(donePlain, "◇ thought") || !strings.Contains(donePlain, "First sentence") {
+		t.Fatalf("expected settled ◇ thought header with head preview when done, got:\n%s", donePlain)
+	}
+
+	// 5. Phase 阶段切换：Connecting -> Thinking -> Tool -> Writing
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	_, _ = m.Update(TurnStartMsg{AgentID: PrimaryAgentID})
+	if m.working.Phase != "connecting" || m.working.TaskDesc != "Connecting…" {
+		t.Fatalf("expected connecting phase on TurnStart, got phase=%q desc=%q", m.working.Phase, m.working.TaskDesc)
+	}
+	_, _ = m.Update(AgentThinkingDeltaMsg{AgentID: PrimaryAgentID, ThinkingDelta: "analyzing architecture"})
+	if m.working.Phase != "thinking" || m.working.TaskDesc != "Thinking…" {
+		t.Fatalf("expected thinking phase on AgentThinkingDelta, got phase=%q desc=%q", m.working.Phase, m.working.TaskDesc)
+	}
+	_, _ = m.Update(AgentStreamDeltaMsg{AgentID: PrimaryAgentID, DeltaText: "Here is the answer."})
+	if m.working.Phase != "writing" || m.working.TaskDesc != "Writing…" {
+		t.Fatalf("expected writing phase on AgentStreamDelta, got phase=%q desc=%q", m.working.Phase, m.working.TaskDesc)
+	}
+}
+
+func TestTUI_MouseClickFoldedTurnAfterMultilineBanner(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	// 插入多行启动欢迎页（此前会因未按 \n 拆行导致 HitRegion 行号偏移十几行，折叠项点不开）
+	m.ShowStartupBanner(StartupSummary{
+		Version:   "v0.1.0",
+		ModelName: "test-model",
+		Tools:     []string{"bash", "read", "edit"},
+	})
+
+	buf := m.AgentBuffer(PrimaryAgentID)
+	buf.Transcript.AddUserMessage("check files", time.Now())
+	_, _ = m.Update(TurnStartMsg{AgentID: PrimaryAgentID})
+	_, _ = m.Update(ToolCallStartMsg{AgentID: PrimaryAgentID, CallID: "c1", ToolName: "read", ArgsRaw: `{"path":"a.go"}`})
+	_, _ = m.Update(ToolCallEndMsg{AgentID: PrimaryAgentID, CallID: "c1", ToolName: "read", Result: "ok", Duration: 120 * time.Millisecond})
+	_, _ = m.Update(AgentStreamDeltaMsg{AgentID: PrimaryAgentID, DeltaText: "Done."})
+	_, _ = m.Update(TurnEndMsg{AgentID: PrimaryAgentID, Outcome: "completed"})
+
+	// 找到视口中折叠摘要行 `▸ took` 所在的屏幕 Y 坐标
+	vpLines := strings.Split(ansi.Strip(buf.Viewport.View()), "\n")
+	turnY := -1
+	for i, line := range vpLines {
+		if strings.Contains(line, "▸ took") {
+			turnY = i
+			break
+		}
+	}
+	if turnY < 0 {
+		t.Fatalf("expected folded turn summary line '▸ took' in viewport, got:\n%s", strings.Join(vpLines, "\n"))
+	}
+
+	// 点击折叠的 Turn 摘要行（Press + Release，无拖动）-> 应展开 Turn
+	_, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: 4, Y: turnY})
+	_, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease, X: 4, Y: turnY})
+	vpAfterTurn := ansi.Strip(buf.Viewport.View())
+	if !strings.Contains(vpAfterTurn, "▾ took") {
+		t.Fatalf("expected folded turn to expand on mouse click at Y=%d, got:\n%s", turnY, vpAfterTurn)
+	}
+
+	// 再找到折叠的工具组行 `▸ 1 call` 并点击 -> 应展开工具组
+	vpLines2 := strings.Split(vpAfterTurn, "\n")
+	groupY := -1
+	for i, line := range vpLines2 {
+		if strings.Contains(line, "▸ 1 call") {
+			groupY = i
+			break
+		}
+	}
+	if groupY < 0 {
+		t.Fatalf("expected folded tool group '▸ 1 call' after expanding turn, got:\n%s", vpAfterTurn)
+	}
+	_, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: 6, Y: groupY})
+	_, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease, X: 6, Y: groupY})
+	vpAfterGroup := ansi.Strip(buf.Viewport.View())
+	if !strings.Contains(vpAfterGroup, "▾ 1 call") {
+		t.Fatalf("expected folded tool group to expand on mouse click at Y=%d, got:\n%s", groupY, vpAfterGroup)
+	}
+}
+
+func TestTUI_StatuslineRegisterableSegmentsAndContextMetrics(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+
+	// 1. 注入系统内部上下文引擎指标 + 压缩计数
+	_, _ = m.Update(TokenUsageMsg{InputTokens: 10000, OutputTokens: 2000, TotalTokens: 12000})
+	_, _ = m.Update(ContextMetricsMsg{
+		TurnIndex:        3,
+		StrategyMode:     "hybrid",
+		EpochID:          2,
+		EpochMaskedCount: 7,
+		LedgerVersion:    4,
+		LedgerActiveCnt:  18,
+		WorkingSetTokens: 1400,
+		ContextBuildMs:   12,
+		InputTokens:      10000,
+		CacheReadTokens:  7800,
+		RecallCalls:      2,
+		SearchCalls:      1,
+	})
+	_, _ = m.Update(CompactionDoneMsg{BeforeTokens: 20000, AfterTokens: 8000})
+
+	// 2. 注册自定义外部插件 Segment
+	m.RegisterStatusSegment(StatusSegment{
+		ID:       "custom_plugin",
+		Side:     StatusSideRight,
+		Priority: 82,
+		Order:    5,
+		Enabled:  true,
+		Render: func(snap FooterSnapshot, th Theme, _ UIConfig) string {
+			return th.Fg(th.Accent, fmt.Sprintf("mode:%s", snap.StrategyMode))
+		},
+	})
+
+	wideView := ansi.Strip(m.footer.Render(180, m.theme, m.config))
+	for _, want := range []string{"mode:hybrid", "T:3", "cache:78%", "ep:2(-7)", "L:v4(18)", "ws:1.4k", "recall:3", "cmp:1", "build:12ms", "ctx: 8.0k/1.00M"} {
+		if !strings.Contains(wideView, want) {
+			t.Fatalf("expected wide statusline to contain %q, got:\n%s", want, wideView)
+		}
+	}
+
+	// 2.5 首轮零值场景（如第 1 轮尚未触发压缩/掩码，ContextBuildMs=0.4ms）也应清晰渲染 T:1 / cache:0% / ep:0 / L:v0 / build:0.4ms
+	mFresh := createTestMainUIModel(t, nil)
+	_, _ = mFresh.Update(ContextMetricsMsg{
+		TurnIndex:      1,
+		StrategyMode:   "hybrid",
+		ContextBuildMs: 0.4,
+		InputTokens:    18800,
+	})
+	freshView := ansi.Strip(mFresh.footer.Render(180, mFresh.theme, mFresh.config))
+	for _, want := range []string{"T:1", "cache:0%", "ep:0", "L:v0", "build:0.4ms"} {
+		if !strings.Contains(freshView, want) {
+			t.Fatalf("expected turn-1 statusline to render %q, got:\n%s", want, freshView)
+		}
+	}
+
+	// 3. 窄终端下按 Priority 自动优雅隐藏低优先级指标，保留核心 ctx 与 cache
+	narrowView := ansi.Strip(m.footer.Render(56, m.theme, m.config))
+	if !strings.Contains(narrowView, "ctx: 8.0k/1.00M") {
+		t.Fatalf("expected narrow statusline to keep high-priority ctx, got:\n%s", narrowView)
+	}
+	if strings.Contains(narrowView, "build:12ms") {
+		t.Fatalf("expected low-priority build segment to be dropped on narrow terminal, got:\n%s", narrowView)
+	}
+
+	// 4. /statusline 打开与 /skills /mcp 一致的交互式弹层菜单，Space 切换、Esc 关闭
+	m.inputArea.SetValue("/statusline")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.overlay.Kind != OverlayStatuslineSelect {
+		t.Fatalf("expected /statusline to open OverlayStatuslineSelect, got %v", m.overlay.Kind)
+	}
+	ovView := ansi.Strip(m.View())
+	if !strings.Contains(ovView, "Statusline Segments") || !strings.Contains(ovView, "[x] cache") {
+		t.Fatalf("expected interactive statusline overlay menu, got:\n%s", ovView)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.overlay.Kind != OverlayNone {
+		t.Fatalf("expected Esc to close statusline overlay, got %v", m.overlay.Kind)
+	}
+
+	// 5. /statusline off cache -> 隐藏 cache 段；/statusline on cache -> 恢复显示
+	m.inputArea.SetValue("/statusline off cache")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	afterOff := ansi.Strip(m.footer.Render(180, m.theme, m.config))
+	if strings.Contains(afterOff, "cache:78%") {
+		t.Fatalf("expected cache segment hidden after '/statusline off cache', got:\n%s", afterOff)
+	}
+
+	m.inputArea.SetValue("/statusline on cache")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	afterOn := ansi.Strip(m.footer.Render(180, m.theme, m.config))
+	if !strings.Contains(afterOn, "cache:78%") {
+		t.Fatalf("expected cache segment restored after '/statusline on cache', got:\n%s", afterOn)
+	}
+}
+
+func TestTUI_MouseDragSelectionAndCopyCommands(t *testing.T) {
+	var copiedText string
+	origWriter := ClipboardWriter
+	ClipboardWriter = func(text string) error {
+		copiedText = text
+		return nil
+	}
+	defer func() { ClipboardWriter = origWriter }()
+
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	_, _ = m.Update(TurnStartMsg{AgentID: PrimaryAgentID})
+	_, _ = m.Update(AgentStreamDeltaMsg{AgentID: PrimaryAgentID, DeltaText: "Hello Copyable World 你好世界"})
+	_, _ = m.Update(TurnEndMsg{AgentID: PrimaryAgentID, Outcome: "completed"})
+
+	// 1. 定位渲染后的屏幕行并模拟鼠标左键拖选（Press -> Motion -> Release）
+	viewLines := strings.Split(ansi.Strip(m.View()), "\n")
+	targetY := -1
+	targetX := -1
+	for y, line := range viewLines {
+		if idx := strings.Index(line, "Copyable World"); idx >= 0 {
+			targetY = y
+			targetX = VisibleWidth(line[:idx])
+			break
+		}
+	}
+	if targetY < 0 {
+		t.Fatalf("expected rendered text 'Copyable World' in View(), got:\n%s", strings.Join(viewLines, "\n"))
+	}
+
+	_, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: targetX, Y: targetY})
+	_, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion, X: targetX + 13, Y: targetY})
+	if !m.selection.Active || !m.selection.HasRange {
+		t.Fatalf("expected active selection range during mouse drag")
+	}
+	_, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonNone, Action: tea.MouseActionRelease, X: targetX + 13, Y: targetY})
+	if copiedText != "Copyable World" {
+		t.Fatalf("expected dragged text %q copied to clipboard, got %q", "Copyable World", copiedText)
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "✓ Copied 14 chars") {
+		t.Fatalf("expected copy toast in editor right hint, got:\n%s", ansi.Strip(m.View()))
+	}
+
+	// 2. /copy 复制最近一条助手回复
+	copiedText = ""
+	m.inputArea.SetValue("/copy")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if copiedText != "Hello Copyable World 你好世界" {
+		t.Fatalf("expected /copy to copy latest reply, got %q", copiedText)
+	}
+
+	// 3. /mouse off 切换为终端原生选择模式并产生 DisableMouse 命令
+	m.inputArea.SetValue("/mouse off")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mouseEnabled {
+		t.Fatalf("expected mouseEnabled=false after '/mouse off'")
+	}
+	if m.pendingCmd == nil {
+		t.Fatalf("expected pending tea.DisableMouse cmd after '/mouse off'")
 	}
 }
 

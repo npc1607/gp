@@ -28,7 +28,7 @@ func (m *MainUIModel) dispatchPrompt(prompt string) {
 	if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 		activeBuf.RawTextBuffer += "\n[User]: " + prompt + "\n\n"
 		activeBuf.Transcript.AddUserMessage(prompt, time.Now())
-		activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+		activeBuf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 	}
 	if m.onUserSubmit != nil {
 		m.onUserSubmit(prompt)

@@ -21,29 +21,31 @@ import (
 type EventType string
 
 const (
-	EventTurnStart     EventType = "turn_start"
-	EventTurnEnd       EventType = "turn_end"
-	EventToolCallStart EventType = "tool_call_start"
-	EventToolProgress  EventType = "tool_progress"
-	EventToolCallEnd   EventType = "tool_call_end"
-	EventUsage         EventType = "usage"
+	EventTurnStart      EventType = "turn_start"
+	EventTurnEnd        EventType = "turn_end"
+	EventToolCallStart  EventType = "tool_call_start"
+	EventToolProgress   EventType = "tool_progress"
+	EventToolCallEnd    EventType = "tool_call_end"
+	EventUsage          EventType = "usage"
+	EventContextMetrics EventType = "context_metrics"
 )
 
 // AgentEvent 结构化 Agent 运行事件，供 TUI / 日志等消费
 type AgentEvent struct {
-	Type       EventType
-	AgentID    string
-	Turn       int
-	CallID     string
-	ToolName   string
-	Args       json.RawMessage
-	Result     string
-	IsError    bool
-	Stalled    bool
-	Duration   time.Duration
-	Usage      *ai.TokenUsage
-	Outcome    string
-	Timestamp  time.Time
+	Type          EventType
+	AgentID       string
+	Turn          int
+	CallID        string
+	ToolName      string
+	Args          json.RawMessage
+	Result        string
+	IsError       bool
+	Stalled       bool
+	Duration      time.Duration
+	Usage         *ai.TokenUsage
+	ContextMetric *storage.ContextMetric
+	Outcome       string
+	Timestamp     time.Time
 }
 
 // Status Agent 生命周期状态机

@@ -10,27 +10,41 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// WorkingSpinners 对应 pi-zentui 的 5 套工作行动画预设
+// WorkingSpinners 对应 pi-zentui 的 5 套工作行动画预设（claude-inspired / star-bloom 采用对称回弹呼吸序列）
 var WorkingSpinners = map[string][]string{
 	"braille":         {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 	"star-bloom":      {"·", "✦", "✧", "✶", "✧", "✦"},
 	"pinwheel":        {"-", "\\", "|", "/"},
-	"claude-inspired": {"·", "✢", "✳", "✶", "✻", "✽"},
+	"claude-inspired": {"·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"},
 	"pulse":           {"⠀⠶⠀", "⠰⣿⠆", "⢾⣉⡷", "⣏⠀⣹", "⡁⠀⢈"},
 }
 
 // WorkingLineState 维护编辑器顶框内嵌的运行中状态行
 type WorkingLineState struct {
 	Active    bool
+	Phase     string // "connecting" | "thinking" | "tool" | "writing"
 	TaskDesc  string
 	ToolName  string
 	StartedAt time.Time
 	FrameIdx  int
+	Tick      int
+}
+
+// TickFrame 以 30fps 推进细腻的扫光与呼吸相位，并按 10fps 节奏推进星芒帧
+func (w *WorkingLineState) TickFrame() {
+	if !w.Active {
+		return
+	}
+	w.Tick++
+	if w.Tick%3 == 0 {
+		w.FrameIdx++
+	}
 }
 
 func (w *WorkingLineState) Advance() {
 	if w.Active {
 		w.FrameIdx++
+		w.Tick += 3
 	}
 }
 
@@ -42,6 +56,31 @@ func (w *WorkingLineState) SpinnerGlyph(preset string) string {
 	return frames[w.FrameIdx%len(frames)]
 }
 
+func (w *WorkingLineState) phaseColors(t Theme) (accent lipgloss.Color, peak lipgloss.Color) {
+	switch w.Phase {
+	case "thinking":
+		return t.Thinking, lipgloss.Color("#fff3d6")
+	case "writing":
+		return t.Success, t.Text
+	case "tool":
+		if w.ToolName != "" {
+			return t.ToolBorderColor(w.ToolName, false, false), t.Text
+		}
+		return t.Accent, t.Text
+	default:
+		return t.Accent, t.Text
+	}
+}
+
+// BreathGlyph 返回用于 Transcript 内部步骤的克制呼吸指示点（与底部主动画视觉去重）
+func (w *WorkingLineState) BreathGlyph(t Theme) string {
+	if !w.Active {
+		return ""
+	}
+	accent, _ := w.phaseColors(t)
+	return RenderBreathingDot(t.BorderMuted, accent, w.Tick)
+}
+
 func (w *WorkingLineState) RenderLabel(t Theme, cfg UIConfig) string {
 	if !w.Active {
 		return ""
@@ -49,15 +88,37 @@ func (w *WorkingLineState) RenderLabel(t Theme, cfg UIConfig) string {
 	glyph := w.SpinnerGlyph(cfg.WorkingSpinner)
 	desc := w.TaskDesc
 	if desc == "" {
-		desc = "Simmering…"
+		switch w.Phase {
+		case "thinking":
+			desc = "Thinking…"
+		case "tool":
+			desc = "Running…"
+		case "writing":
+			desc = "Writing…"
+		default:
+			desc = "Connecting…"
+		}
 	}
 	elapsed := time.Since(w.StartedAt)
 	if w.StartedAt.IsZero() {
 		elapsed = 0
 	}
+
+	phaseAccent, peakColor := w.phaseColors(t)
+	// 星芒图标做平滑明暗呼吸（暗灰 <-> 阶段主色）
+	breath := 0.30 + 0.70*BreathingFactor(w.Tick, 36)
+	glyphColor := LerpColor(t.Muted, phaseAccent, breath)
+	glyphStyle := lipgloss.NewStyle().Foreground(glyphColor)
+	if breath > 0.65 {
+		glyphStyle = glyphStyle.Bold(true)
+	}
+
+	// 状态词做柔和流光扫掠（底色 -> 高光波峰）
+	shimmerDesc := RenderShimmerText(desc, t.Muted, peakColor, w.Tick, true)
+
 	parts := []string{
-		t.BoldFg(t.Accent, glyph),
-		t.BoldFg(t.Text, desc),
+		glyphStyle.Render(glyph),
+		shimmerDesc,
 	}
 	if w.ToolName != "" {
 		parts = append(parts, t.Fg(t.Muted, "("+w.ToolName+")"))

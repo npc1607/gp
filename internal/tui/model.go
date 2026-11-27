@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // PrimaryAgentID 主协调 Agent 的默认标识
@@ -59,6 +60,9 @@ type MainUIModel struct {
 	inputHistory        *InputHistory
 	vim                 *VimState
 	keymap              *KeymapRegistry
+	selection           TextSelectionState
+	mouseEnabled        bool
+	pendingCmd          tea.Cmd
 	primaryBusy         bool
 	interruptedThisTurn bool
 	width               int
@@ -118,6 +122,7 @@ func NewMainUIModel(header HeaderInfo, onSubmit func(prompt string)) *MainUIMode
 		inputHistory: NewInputHistory(),
 		vim:          NewVimState(),
 		keymap:       NewDefaultKeymap(),
+		mouseEnabled: true,
 		width:        defaultWidth,
 		height:       defaultHeight,
 		onUserSubmit: onSubmit,
@@ -205,7 +210,7 @@ func (m *MainUIModel) resizeAllBuffers() {
 	for _, buf := range m.agentBuffers {
 		buf.Resize(bodyW, bodyH)
 		if buf.Dirty {
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
+			buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), false)
 		}
 	}
 }
@@ -269,6 +274,18 @@ func (m *MainUIModel) SetCompactHandler(fn func(focus string) (int64, int64, err
 // SetThinkingChangeHandler 注册思考深度变更回调
 func (m *MainUIModel) SetThinkingChangeHandler(fn func(level string) error) {
 	m.onThinkingChange = fn
+}
+
+// Footer 返回底部状态栏实例，供外部模块或插件访问
+func (m *MainUIModel) Footer() *FooterState {
+	return m.footer
+}
+
+// RegisterStatusSegment 向底部 Statusline 注册一个自定义指标段
+func (m *MainUIModel) RegisterStatusSegment(seg StatusSegment) {
+	if m.footer != nil {
+		m.footer.RegisterSegment(seg)
+	}
 }
 
 // WorkflowTree 获取 DAG 拓扑树组件引用
@@ -344,9 +361,17 @@ func (m *MainUIModel) cyclePrevTab() {
 	m.syncActiveBuffer(true)
 }
 
+// transcriptPulseGlyph 返回用于 Transcript 内部步骤的克制呼吸指示点（与底部 WorkingLine 视觉去重）
+func (m *MainUIModel) transcriptPulseGlyph() string {
+	if m.working == nil {
+		return ""
+	}
+	return m.working.BreathGlyph(m.theme)
+}
+
 func (m *MainUIModel) syncActiveBuffer(autoScroll bool) {
 	if buf, ok := m.agentBuffers[m.activeTabID]; ok {
-		buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), autoScroll)
+		buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), autoScroll)
 	}
 }
 
@@ -375,28 +400,53 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
+		if msg.Button == tea.MouseButtonWheelUp {
+			m.selection.Clear()
 			activeBuf.Scroll(-3)
 			return m, nil
-		case tea.MouseButtonWheelDown:
+		}
+		if msg.Button == tea.MouseButtonWheelDown {
+			m.selection.Clear()
 			activeBuf.Scroll(3)
 			return m, nil
-		case tea.MouseButtonLeft:
-			if msg.Action == tea.MouseActionPress {
-				headerOffset := 0
-				if len(m.tabIDs) > 1 {
-					headerOffset = 1
-				}
-				_, bodyH := m.computeBodySize(m.width, m.height)
-				relY := msg.Y - headerOffset
-				if relY >= 0 && relY < bodyH {
-					absLine := activeBuf.Viewport.YOffset + relY
-					if activeBuf.Transcript.HandleClick(absLine) {
-						activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
+		}
+		if m.selection.Active && msg.Action == tea.MouseActionMotion {
+			m.selection.Update(msg.X, msg.Y)
+			return m, nil
+		}
+		if m.selection.Active && msg.Action == tea.MouseActionRelease {
+			m.selection.Update(msg.X, msg.Y)
+			if m.selection.HasRange {
+				frame := m.renderView(false)
+				copied := ExtractSelectedText(frame, m.selection)
+				m.selection.Clear()
+				if copied != "" {
+					if err := CopyTextToClipboard(copied); err != nil {
+						m.selection.SetToast("✗ Copy failed", 2500*time.Millisecond)
+					} else {
+						m.selection.SetToast(fmt.Sprintf("✓ Copied %d chars", len([]rune(copied))), 2500*time.Millisecond)
 					}
 				}
+				return m, nil
 			}
+			// 纯单击（未拖动）：执行折叠/展开点击命中
+			m.selection.Clear()
+			headerOffset := 0
+			if len(m.tabIDs) > 1 {
+				headerOffset = 1
+			}
+			_, bodyH := m.computeBodySize(m.width, m.height)
+			relY := msg.Y - headerOffset
+			if relY >= 0 && relY < bodyH {
+				absLine := activeBuf.Viewport.YOffset + relY
+				if activeBuf.Transcript.HandleClick(absLine) {
+					activeBuf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), false)
+				}
+			}
+			return m, nil
+		}
+		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+			m.selection.Start(msg.X, msg.Y)
 			return m, nil
 		}
 		return m, nil
@@ -501,16 +551,27 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case TickMsg:
 		m.tickCount++
-		if m.working.Active && m.tickCount%3 == 0 {
-			m.working.Advance()
-			m.syncActiveBuffer(false)
+		if m.working.Active {
+			m.working.TickFrame()
+			if m.tickCount%3 == 0 {
+				m.syncActiveBuffer(false)
+			} else if buf, ok := m.agentBuffers[m.activeTabID]; ok && buf.Dirty {
+				autoScroll := buf.AutoScroll
+				buf.AutoScroll = false
+				buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), autoScroll)
+			}
 		} else if buf, ok := m.agentBuffers[m.activeTabID]; ok && buf.Dirty {
 			autoScroll := buf.AutoScroll
 			buf.AutoScroll = false
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), autoScroll)
+			buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), autoScroll)
 		}
 		if m.tickCount%90 == 0 && m.footer != nil {
 			m.footer.RefreshGit()
+		}
+		if m.pendingCmd != nil {
+			pc := m.pendingCmd
+			m.pendingCmd = nil
+			return m, tea.Batch(tickEvery(m.fpsTicker), pc)
 		}
 		return m, tickEvery(m.fpsTicker)
 
@@ -531,8 +592,13 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			buf := m.EnsureAgentBuffer(specMsg.AgentID, "")
 			buf.RawTextBuffer += specMsg.DeltaText
 			buf.Transcript.AppendTextDelta(specMsg.DeltaText, m.config)
+			if (specMsg.AgentID == "" || specMsg.AgentID == PrimaryAgentID) && m.working.Active {
+				m.working.Phase = "writing"
+				m.working.TaskDesc = "Writing…"
+				m.working.ToolName = ""
+			}
 			if buf.LastSync.IsZero() || time.Since(buf.LastSync) >= 33*time.Millisecond {
-				buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+				buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 				buf.LastSync = time.Now()
 			} else {
 				buf.Dirty = true
@@ -543,6 +609,15 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case AgentThinkingDeltaMsg:
 			buf := m.EnsureAgentBuffer(specMsg.AgentID, "")
 			buf.Transcript.AppendThinkingDelta(specMsg.ThinkingDelta, m.config)
+			if specMsg.AgentID == "" || specMsg.AgentID == PrimaryAgentID {
+				m.working.Active = true
+				m.working.Phase = "thinking"
+				m.working.TaskDesc = "Thinking…"
+				m.working.ToolName = ""
+				if m.working.StartedAt.IsZero() {
+					m.working.StartedAt = time.Now()
+				}
+			}
 			buf.Dirty = true
 			return m, tea.Batch(cmds...)
 
@@ -553,10 +628,11 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.workflowTree.MarkStarted()
 			}
 			m.working.Active = true
-			m.working.TaskDesc = "Simmering…"
+			m.working.Phase = "connecting"
+			m.working.TaskDesc = "Connecting…"
 			m.working.ToolName = ""
 			m.working.StartedAt = time.Now()
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+			buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 			return m, tea.Batch(cmds...)
 
 		case TurnEndMsg:
@@ -569,27 +645,35 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if specMsg.AgentID == "" || specMsg.AgentID == PrimaryAgentID {
 				m.workflowTree.MarkStopped()
 				m.working.Active = false
+				m.working.Phase = ""
+				m.working.TaskDesc = ""
 				m.working.ToolName = ""
 			}
 			if m.footer != nil {
 				m.footer.RefreshGit()
 			}
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+			buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 			return m, tea.Batch(cmds...)
 
 		case ToolCallStartMsg:
 			buf := m.EnsureAgentBuffer(specMsg.AgentID, "")
 			buf.Transcript.StartToolCall(specMsg.CallID, specMsg.ToolName, specMsg.ArgsRaw, m.config)
 			m.working.Active = true
+			m.working.Phase = "tool"
+			m.working.TaskDesc = "Running…"
 			m.working.ToolName = specMsg.ToolName
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+			buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 			return m, tea.Batch(cmds...)
 
 		case ToolCallEndMsg:
 			buf := m.EnsureAgentBuffer(specMsg.AgentID, "")
 			buf.Transcript.FinishToolCall(specMsg.CallID, specMsg.ToolName, specMsg.ArgsRaw, specMsg.Result, specMsg.IsError, specMsg.Duration)
 			m.working.ToolName = ""
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+			if m.working.Active {
+				m.working.Phase = "thinking"
+				m.working.TaskDesc = "Thinking…"
+			}
+			buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 			return m, tea.Batch(cmds...)
 
 		case TokenUsageMsg:
@@ -601,6 +685,12 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.footer.ContextUsed = m.footer.InputTokens + m.footer.OutputTokens
 				}
+			}
+			return m, tea.Batch(cmds...)
+
+		case ContextMetricsMsg:
+			if m.footer != nil {
+				m.footer.ApplyContextMetrics(specMsg)
 			}
 			return m, tea.Batch(cmds...)
 
@@ -664,7 +754,7 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.working.Active = true
 				m.working.ToolName = fmt.Sprintf("%d subagents", len(m.tray.order))
 			}
-			pBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), parentID == m.activeTabID)
+			pBuf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), parentID == m.activeTabID)
 			return m, tea.Batch(cmds...)
 
 		case DAGNodeStatusMsg:
@@ -718,7 +808,7 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.addSystemNotice(fmt.Sprintf("Compact failed: %v", specMsg.Err), true)
 			} else {
 				if m.footer != nil {
-					m.footer.ContextUsed = specMsg.AfterTokens
+					m.footer.RecordCompaction(specMsg.AfterTokens)
 				}
 				m.addSystemNotice(fmt.Sprintf("✓ Compacted context: %s → %s tokens",
 					FormatTokenCompact(specMsg.BeforeTokens), FormatTokenCompact(specMsg.AfterTokens)), false)
@@ -732,7 +822,7 @@ func (m *MainUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if activeBuf, ok := m.agentBuffers[m.activeTabID]; ok {
 					activeBuf.RawTextBuffer += "\n[Error]: " + specMsg.Err.Error() + "\n"
 					activeBuf.Transcript.AddError(specMsg.Err.Error())
-					activeBuf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+					activeBuf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 				}
 			}
 			return m, tea.Batch(cmds...)
@@ -865,7 +955,7 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		if buf, ok := m.agentBuffers[m.activeTabID]; ok {
 			buf.RawTextBuffer = ""
 			buf.Transcript = NewTranscript(m.header.ModelName, m.header.ProviderName)
-			buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+			buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 		}
 		if m.footer != nil {
 			m.footer.ContextUsed = 0
@@ -916,7 +1006,7 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 					if v.Kind == "turn" {
 						v.Turn.Folded = !v.Turn.Folded
 						v.Turn.FoldManual = true
-						buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), false)
+						buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), false)
 						break
 					}
 				}
@@ -954,6 +1044,114 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 		}
 		return true
 
+	case "/copy":
+		buf, ok := m.agentBuffers[m.activeTabID]
+		if !ok || buf == nil {
+			return true
+		}
+		var text string
+		if len(fields) >= 2 && strings.EqualFold(fields[1], "all") {
+			text = strings.TrimSpace(ansi.Strip(buf.Transcript.Render(max(m.width, 80), m.theme, m.config, "")))
+		} else {
+			// 默认复制最近一条非空助手回复
+			for i := len(buf.Transcript.Items) - 1; i >= 0; i-- {
+				it := buf.Transcript.Items[i]
+				if it.Kind != "turn" || it.Turn == nil {
+					continue
+				}
+				if strings.TrimSpace(it.Turn.FinalText) != "" {
+					text = strings.TrimSpace(it.Turn.FinalText)
+					break
+				}
+				for j := len(it.Turn.Steps) - 1; j >= 0; j-- {
+					if it.Turn.Steps[j].Kind == "text" && strings.TrimSpace(it.Turn.Steps[j].Text) != "" {
+						text = strings.TrimSpace(it.Turn.Steps[j].Text)
+						break
+					}
+				}
+				if text != "" {
+					break
+				}
+			}
+		}
+		if text == "" {
+			m.addSystemNotice("No text available to copy.", true)
+			return true
+		}
+		if err := CopyTextToClipboard(text); err != nil {
+			m.addSystemNotice(fmt.Sprintf("Copy failed: %v", err), true)
+			return true
+		}
+		m.selection.SetToast(fmt.Sprintf("✓ Copied %d chars", len([]rune(text))), 2500*time.Millisecond)
+		m.addSystemNotice(fmt.Sprintf("✓ Copied %d chars to clipboard", len([]rune(text))), false)
+		return true
+
+	case "/mouse":
+		enable := !m.mouseEnabled
+		if len(fields) >= 2 {
+			switch strings.ToLower(fields[1]) {
+			case "on", "enable", "true":
+				enable = true
+			case "off", "disable", "false":
+				enable = false
+			}
+		}
+		m.mouseEnabled = enable
+		if enable {
+			m.pendingCmd = tea.EnableMouseCellMotion
+			m.addSystemNotice("✓ TUI mouse enabled (drag to copy · click to fold · wheel to scroll)", false)
+		} else {
+			m.selection.Clear()
+			m.pendingCmd = tea.DisableMouse
+			m.addSystemNotice("✓ TUI mouse disabled (native terminal text selection active; run /mouse on to restore)", false)
+		}
+		return true
+
+	case "/statusline":
+		if m.footer == nil {
+			return true
+		}
+		if len(fields) == 1 || fields[1] == "list" {
+			m.overlay.Close()
+			m.overlay.Kind = OverlayStatuslineSelect
+			m.overlay.Segments = m.footer.ListSegments()
+			return true
+		}
+		switch fields[1] {
+		case "reset":
+			m.footer.ResetSegments()
+			m.addSystemNotice("✓ Statusline segments reset to defaults", false)
+		case "toggle":
+			if len(fields) < 3 {
+				m.addSystemNotice("Usage: /statusline toggle <id>", true)
+				return true
+			}
+			en, ok := m.footer.ToggleSegment(fields[2])
+			if !ok {
+				m.addSystemNotice(fmt.Sprintf("Unknown statusline segment: %s", fields[2]), true)
+				return true
+			}
+			state := "off"
+			if en {
+				state = "on"
+			}
+			m.addSystemNotice(fmt.Sprintf("✓ Statusline segment %q -> %s", fields[2], state), false)
+		case "on", "off":
+			if len(fields) < 3 {
+				m.addSystemNotice(fmt.Sprintf("Usage: /statusline %s <id>", fields[1]), true)
+				return true
+			}
+			want := fields[1] == "on"
+			if !m.footer.SetSegmentEnabled(fields[2], want) {
+				m.addSystemNotice(fmt.Sprintf("Unknown statusline segment: %s", fields[2]), true)
+				return true
+			}
+			m.addSystemNotice(fmt.Sprintf("✓ Statusline segment %q -> %s", fields[2], fields[1]), false)
+		default:
+			m.addSystemNotice("Usage: /statusline [list|toggle|on|off|reset] [id]", true)
+		}
+		return true
+
 	case "/zentui":
 		if len(fields) >= 3 && fields[1] == "preset" {
 			switch fields[2] {
@@ -985,7 +1183,7 @@ func (m *MainUIModel) addSystemNotice(msg string, isErr bool) {
 		} else {
 			buf.Transcript.AddNotice(msg)
 		}
-		buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+		buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 	}
 }
 
@@ -1155,7 +1353,7 @@ func (m *MainUIModel) applyResumeSession(sessionID string) {
 		m.footer.ContextUsed = compaction.EstimateMessagesTokens(msgs)
 	}
 	buf.Transcript.AddNotice(fmt.Sprintf("✓ Resumed conversation %s (%d messages)", sessionID, len(msgs)))
-	buf.SyncViewport(m.theme, m.config, m.working.SpinnerGlyph(m.config.WorkingSpinner), true)
+	buf.SyncViewport(m.theme, m.config, m.transcriptPulseGlyph(), true)
 }
 
 func (m *MainUIModel) renderTabBar() string {
@@ -1199,6 +1397,10 @@ func (m *MainUIModel) renderTabBar() string {
 
 // View 渲染完整 pi-tidy + pi-zentui 界面
 func (m *MainUIModel) View() string {
+	return m.renderView(true)
+}
+
+func (m *MainUIModel) renderView(applySelection bool) string {
 	width := max(m.width, 20)
 	height := max(m.height, 12)
 
@@ -1270,6 +1472,9 @@ func (m *MainUIModel) View() string {
 		stopKey = strings.ToLower(m.keymap.HintLabel("interrupt_or_rollback", stopKey))
 	}
 	rightHint := "ctrl+x zoom · " + foldKey + " fold"
+	if toast := m.selection.ActiveToast(); toast != "" {
+		rightHint = toast + " · " + rightHint
+	}
 	if m.editorSelectedAll {
 		rightHint = "Backspace/Del clear · Type replace · Esc cancel"
 	} else {
@@ -1315,5 +1520,9 @@ func (m *MainUIModel) View() string {
 		}
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, elements...)
+	out := lipgloss.JoinVertical(lipgloss.Left, elements...)
+	if applySelection && m.selection.Active && m.selection.HasRange {
+		return ApplySelectionHighlight(out, m.selection, m.theme)
+	}
+	return out
 }

@@ -61,6 +61,29 @@ type TokenUsageMsg struct {
 	TotalTokens  int64
 }
 
+// ContextMetricsMsg 系统内部上下文引擎每轮实时指标（供底部 Statusline 展示）
+type ContextMetricsMsg struct {
+	TurnIndex            int
+	StrategyMode         string
+	EpochID              int
+	EpochMaskedCount     int
+	LedgerVersion        int
+	LedgerActiveCnt      int
+	LedgerSuperseded     int
+	WorkingSetTokens     int64
+	WorkingSetEntries    int
+	GraphMatchedEntities int
+	ContextBuildMs       float64
+	RetrievalBuildMs     float64
+	InputTokens          int64
+	CacheReadTokens      int64
+	CacheWriteTokens     int64
+	OutputTokens         int64
+	RecallCalls          int
+	RestoreCalls         int
+	SearchCalls          int
+}
+
 // AgentStatusChangedMsg Agent 状态跃迁通知 (状态机变化、工具调用)
 type AgentStatusChangedMsg struct {
 	AgentID   string

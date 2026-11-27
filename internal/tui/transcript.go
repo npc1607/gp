@@ -67,13 +67,14 @@ type ToolGroup struct {
 }
 
 type TurnStep struct {
-	Kind      string // "thinking" | "text" | "group" | "tool_box"
-	Thinking  string
-	ThinkOpen bool
-	ThinkDur  time.Duration
-	Text      string
-	Group     *ToolGroup
-	Tool      *ToolCallItem
+	Kind           string // "thinking" | "text" | "group" | "tool_box"
+	Thinking       string
+	ThinkOpen      bool
+	ThinkStartedAt time.Time
+	ThinkDur       time.Duration
+	Text           string
+	Group          *ToolGroup
+	Tool           *ToolCallItem
 }
 
 type TurnItem struct {
@@ -211,6 +212,16 @@ func (tr *Transcript) StartTurn(cfg UIConfig) *TurnItem {
 	return turn
 }
 
+func finalizeTrailingThinking(turn *TurnItem, now time.Time) {
+	if turn == nil || len(turn.Steps) == 0 {
+		return
+	}
+	last := turn.Steps[len(turn.Steps)-1]
+	if last.Kind == "thinking" && last.ThinkDur == 0 && !last.ThinkStartedAt.IsZero() {
+		last.ThinkDur = now.Sub(last.ThinkStartedAt)
+	}
+}
+
 func (tr *Transcript) AppendThinkingDelta(delta string, cfg UIConfig) {
 	turn := tr.ActiveTurn(cfg)
 	if len(turn.Steps) > 0 && turn.Steps[len(turn.Steps)-1].Kind == "thinking" {
@@ -218,13 +229,15 @@ func (tr *Transcript) AppendThinkingDelta(delta string, cfg UIConfig) {
 		return
 	}
 	turn.Steps = append(turn.Steps, &TurnStep{
-		Kind:     "thinking",
-		Thinking: delta,
+		Kind:           "thinking",
+		Thinking:       delta,
+		ThinkStartedAt: time.Now(),
 	})
 }
 
 func (tr *Transcript) AppendTextDelta(delta string, cfg UIConfig) {
 	turn := tr.ActiveTurn(cfg)
+	finalizeTrailingThinking(turn, time.Now())
 	if len(turn.Steps) > 0 && turn.Steps[len(turn.Steps)-1].Kind == "text" {
 		turn.Steps[len(turn.Steps)-1].Text += delta
 		return
@@ -237,6 +250,7 @@ func (tr *Transcript) AppendTextDelta(delta string, cfg UIConfig) {
 
 func (tr *Transcript) StartToolCall(callID, toolName, argsRaw string, cfg UIConfig) {
 	turn := tr.ActiveTurn(cfg)
+	finalizeTrailingThinking(turn, time.Now())
 	tc := &ToolCallItem{
 		CallID:    callID,
 		ToolName:  toolName,
@@ -313,6 +327,7 @@ func (tr *Transcript) FinishTurn(outcome string, cfg UIConfig) {
 		}
 		turn.Outcome = outcome
 		turn.EndedAt = now
+		finalizeTrailingThinking(turn, now)
 		// 提取最后一个非空 text step 作为 FinalText（仅当已结束且存在回复时）
 		for _, v := range slices.Backward(turn.Steps) {
 			if v.Kind == "text" && strings.TrimSpace(v.Text) != "" {
@@ -462,7 +477,9 @@ func (tr *Transcript) Render(width int, t Theme, cfg UIConfig, spinnerGlyph stri
 			lines = append(lines, renderErrorItem(item.ErrItem, width, t, cfg)...)
 			lines = append(lines, "")
 		case "notice":
-			lines = append(lines, " "+t.Fg(t.Success, item.Notice))
+			for _, nl := range strings.Split(item.Notice, "\n") {
+				lines = append(lines, " "+t.Fg(t.Success, nl))
+			}
 			lines = append(lines, "")
 		case "turn":
 			turnLines := tr.renderTurnItem(idx, item.Turn, len(lines), width, t, cfg, spinnerGlyph)
@@ -613,7 +630,8 @@ func (tr *Transcript) renderTurnItem(turnIdx int, turn *TurnItem, baseLine int, 
 				continue
 			}
 			startL := baseLine + len(out)
-			thinkLines := renderThinkingStep(st, innerW, t, cfg, turn.Outcome == "running", spinnerGlyph)
+			activeThinking := turn.Outcome == "running" && stepIdx == len(turn.Steps)-1
+			thinkLines := renderThinkingStep(st, innerW, t, cfg, activeThinking, spinnerGlyph)
 			for _, tl := range thinkLines {
 				if railActive {
 					out = append(out, railPrefix+tl)
@@ -736,15 +754,16 @@ func (tr *Transcript) formatTurnSummary(turn *TurnItem, width int, t Theme, cfg 
 		total = turn.EndedAt.Sub(turn.StartedAt)
 	}
 	verb := "took"
+	markerPart := t.Fg(assistantColor, marker)
 	if turn.Outcome == "running" {
 		verb = "running"
 		if spinnerGlyph != "" {
-			marker = spinnerGlyph
+			markerPart = spinnerGlyph
 		}
 	}
 
 	var parts []string
-	parts = append(parts, t.Fg(assistantColor, fmt.Sprintf("%s %s %s", marker, verb, formatShortDuration(total))))
+	parts = append(parts, markerPart+" "+t.Fg(assistantColor, fmt.Sprintf("%s %s", verb, formatShortDuration(total))))
 
 	var toolCount, failedCount int
 	var toolOrder []string
@@ -833,32 +852,101 @@ func (tr *Transcript) formatTurnSummary(turn *TurnItem, width int, t Theme, cfg 
 	return ClipToWidth(" "+strings.Join(parts, sep), width, "…")
 }
 
-func renderThinkingStep(st *TurnStep, width int, t Theme, cfg UIConfig, running bool, spinnerGlyph string) []string {
+// clipTailToWidth 从尾部截取适应预算宽度的实时文本，超出时前置省略号（CJK 宽字符安全）
+func clipTailToWidth(s string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	if VisibleWidth(s) <= budget {
+		return s
+	}
+	if budget <= 2 {
+		return "…"
+	}
+	runes := []rune(s)
+	limit := budget - 2 // 预留 "… "
+	w := 0
+	start := len(runes)
+	for i := len(runes) - 1; i >= 0; i-- {
+		rw := VisibleWidth(string(runes[i]))
+		if w+rw > limit {
+			break
+		}
+		w += rw
+		start = i
+	}
+	tail := strings.TrimLeft(string(runes[start:]), " ")
+	if tail == "" {
+		return ClipToWidth(s, budget, "…")
+	}
+	return "… " + tail
+}
+
+func renderThinkingStep(st *TurnStep, width int, t Theme, cfg UIConfig, activeThinking bool, pulseGlyph string) []string {
 	ic := ThinkingIcon(cfg.Icons)
+	dur := st.ThinkDur
+	if activeThinking && !st.ThinkStartedAt.IsZero() {
+		dur = time.Since(st.ThinkStartedAt)
+	}
+
 	if st.ThinkOpen {
-		label := t.BoldFg(t.Thinking, "thinking")
-		if ic != "" {
-			label = t.Fg(t.Thinking, ic) + " " + label
+		var label string
+		borderColor := t.Border
+		if activeThinking {
+			borderColor = t.Thinking
+			label = t.BoldFg(t.Thinking, "thinking")
+			if dur >= 500*time.Millisecond {
+				label += " " + t.Fg(t.Muted, "· "+formatShortDuration(dur))
+			}
+			if pulseGlyph != "" {
+				label = pulseGlyph + " " + label
+			} else if ic != "" {
+				label = t.Fg(t.Thinking, ic) + " " + label
+			}
+		} else {
+			label = t.Fg(t.Muted, "thought")
+			if dur > 0 {
+				label += " " + t.Fg(t.Muted, "· "+formatShortDuration(dur))
+			}
+			if ic != "" {
+				label = t.Fg(t.Thinking, ic) + " " + label
+			}
 		}
 		body := wrapStyledLine(t.ItalicFg(t.Muted, strings.TrimSpace(st.Thinking)), width-4)
 		for i := range body {
 			body[i] = " " + body[i]
 		}
-		return DrawFrame(body, width, t, t.Thinking, label, "left", 1)
+		return DrawFrame(body, width, t, borderColor, label, "left", 1)
 	}
-	// 折叠单行：截取最新思考文本的一行摘要
+
 	flat := strings.Join(strings.Fields(st.Thinking), " ")
-	glyph := ic
-	if running && spinnerGlyph != "" {
-		glyph = spinnerGlyph
+	if activeThinking {
+		// 思考进行中：左侧使用克制呼吸点，右侧展示最新尾部实时摘要
+		head := t.Fg(t.Thinking, "thinking")
+		if dur >= 500*time.Millisecond {
+			head += " " + t.Fg(t.Muted, formatShortDuration(dur))
+		}
+		if pulseGlyph != "" {
+			head = pulseGlyph + " " + head
+		} else if ic != "" {
+			head = t.Fg(t.Thinking, ic) + " " + head
+		}
+		budget := max(width-VisibleWidth(head)-4, 8)
+		preview := clipTailToWidth(flat, budget)
+		return []string{" " + head + "  " + t.ItalicFg(t.Muted, preview)}
 	}
-	head := t.Fg(t.Thinking, "thinking")
-	if glyph != "" {
-		head = t.Fg(t.Thinking, glyph) + " " + head
+
+	// 思考已完成：静谧收束态（◇ thought 2.4s + 开头摘要）
+	head := t.Fg(t.Muted, "thought")
+	if dur > 0 {
+		head += " " + t.Fg(t.Muted, formatShortDuration(dur))
+	}
+	if ic != "" {
+		head = t.Fg(t.Thinking, ic) + " " + head
 	}
 	budget := max(width-VisibleWidth(head)-4, 8)
 	preview := ClipToWidth(flat, budget, "…")
-	return []string{" " + head + "  " + t.ItalicFg(t.Muted, preview)}
+	return []string{" " + head + "  " + t.ItalicFg(t.Dim, preview)}
 }
 
 func (tr *Transcript) renderToolGroup(turnIdx, stepIdx int, g *ToolGroup, baseLine int, width int, t Theme, cfg UIConfig, spinnerGlyph, outerRail string) []string {
