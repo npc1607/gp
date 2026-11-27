@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -258,4 +259,59 @@ func TestCLI_TC_TUI_012_NonTTYFallback(t *testing.T) {
 
 func TestCLI_InteractiveModeFallback(t *testing.T) {
 	TestCLI_TC_TUI_012_NonTTYFallback(t)
+}
+
+func TestConfigureDefaultLogger_SilencesTUIWithoutDebug(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	// 1. Foreground TUI mode without debug must discard Info/Warn logs instead of writing to stderr.
+	var sentinel bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&sentinel, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	closeFn, err := configureDefaultLogger(false, modes.ModeInteractive, t.TempDir())
+	if err != nil {
+		t.Fatalf("configureDefaultLogger(interactive, false) error = %v", err)
+	}
+	defer closeFn()
+
+	slog.Info("[ctx_metrics]", "turn_index", 1)
+	slog.Warn("non-fatal warning")
+	if sentinel.Len() != 0 {
+		t.Fatalf("expected previous handler replaced & silenced in interactive mode, got %q", sentinel.String())
+	}
+	if slog.Default().Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatalf("expected slog Info disabled/discarded in non-debug interactive mode")
+	}
+
+	// 2. RPC daemon mode without debug preserves active logger.
+	var rpcBuf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&rpcBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	closeRPC, err := configureDefaultLogger(false, modes.ModeRPC, t.TempDir())
+	if err != nil {
+		t.Fatalf("configureDefaultLogger(rpc, false) error = %v", err)
+	}
+	defer closeRPC()
+	slog.Info("[ctx_metrics]", "turn_index", 2)
+	if !strings.Contains(rpcBuf.String(), "[ctx_metrics]") {
+		t.Fatalf("expected RPC mode to keep Info logging, got %q", rpcBuf.String())
+	}
+
+	// 3. Debug mode writes logs to gp-debug-*.log even in interactive mode.
+	logDir := t.TempDir()
+	closeDbg, err := configureDefaultLogger(true, modes.ModeInteractive, logDir)
+	if err != nil {
+		t.Fatalf("configureDefaultLogger(interactive, true) error = %v", err)
+	}
+	slog.Info("[ctx_metrics]", "turn_index", 3)
+	closeDbg()
+
+	matches, err := filepath.Glob(filepath.Join(logDir, "gp-debug-*.log"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected 1 debug log file, got %v err=%v", matches, err)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil || !strings.Contains(string(data), "[ctx_metrics]") {
+		t.Fatalf("expected debug log file to contain [ctx_metrics], got %q err=%v", string(data), err)
+	}
 }

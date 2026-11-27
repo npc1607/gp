@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -51,7 +52,7 @@ func debugEnvEnabled() bool {
 }
 
 // setupDebugLog 开启 slog 调试日志：Debug 级别写入 logs/gp-debug-<时间戳>.log，
-// 并将其设为 slog 默认 logger；未开启时保持默认 Info 级别，Debug 日志静默丢弃。
+// 并将其设为 slog 默认 logger；未开启时在非 RPC 模式下静默丢弃以免污染 TUI 终端界面。
 func setupDebugLog(dir string) (string, func(), error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", func() {}, fmt.Errorf("create log dir %q: %w", dir, err)
@@ -64,6 +65,21 @@ func setupDebugLog(dir string) (string, func(), error) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	slog.Debug("debug log initialized", "component", "CLI", "file", path)
 	return path, func() { _ = f.Close() }, nil
+}
+
+// configureDefaultLogger 根据运行模式与调试开关设置 slog 默认输出目标：
+// 1. debug=true 时统一写入调试日志文件；
+// 2. debug=false 且处于 interactive/print/resume 等前景终端模式时静默丢弃 slog，防止日志覆盖 TUI 画面；
+// 3. RPC/serve 守护进程模式保留标准错误日志输出。
+func configureDefaultLogger(debug bool, activeMode modes.Mode, logDir string) (func(), error) {
+	if debug {
+		_, closeFn, err := setupDebugLog(logDir)
+		return closeFn, err
+	}
+	if activeMode != modes.ModeRPC {
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1})))
+	}
+	return func() {}, nil
 }
 
 func main() {
@@ -126,6 +142,11 @@ func main() {
 
 	// 1. 处理 resume 子命令 (如: gp resume [session_id] [-db ...] [-model ...] [-tools ...])
 	if len(os.Args) > 1 && os.Args[1] == "resume" {
+		if closeLog, logErr := configureDefaultLogger(debugEnvEnabled(), modes.ModeResume, filepath.Join(cwd, "logs")); logErr != nil {
+			fmt.Fprintf(os.Stderr, "警告: 初始化调试日志失败: %v\n", logErr)
+		} else {
+			defer closeLog()
+		}
 		resumeCmd := flag.NewFlagSet("resume", flag.ExitOnError)
 		resumeDB := resumeCmd.String("db", defaultDBPath(), "SQLite 数据库路径")
 		resumeModel := resumeCmd.String("model", "", "指定模型标识")
@@ -169,14 +190,6 @@ func main() {
 
 	flag.Parse()
 
-	if *flagDebug || debugEnvEnabled() {
-		if _, closeLog, logErr := setupDebugLog(filepath.Join(cwd, "logs")); logErr != nil {
-			fmt.Fprintf(os.Stderr, "警告: 初始化调试日志失败: %v\n", logErr)
-		} else {
-			defer closeLog()
-		}
-	}
-
 	if *flagVersion {
 		fmt.Printf("gp (Go Coding Agent Harness) %s\n", Version)
 		return
@@ -193,6 +206,12 @@ func main() {
 	}
 	if *flagResume {
 		activeMode = modes.ModeResume
+	}
+
+	if closeLog, logErr := configureDefaultLogger(*flagDebug || debugEnvEnabled(), activeMode, filepath.Join(cwd, "logs")); logErr != nil {
+		fmt.Fprintf(os.Stderr, "警告: 初始化调试日志失败: %v\n", logErr)
+	} else {
+		defer closeLog()
 	}
 
 	remainingArgs := flag.Args()
