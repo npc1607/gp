@@ -330,6 +330,14 @@ func (m *MainUIModel) HandleAskUserKey(msg tea.KeyMsg) bool {
 	}
 
 	// Question Tab 导航
+	if len(d.Questions) == 0 {
+		d.finish(true)
+		m.resizeAllBuffers()
+		return true
+	}
+	if d.ActiveTab < 0 || d.ActiveTab >= len(d.Questions) {
+		d.ActiveTab = 0
+	}
 	q := d.Questions[d.ActiveTab]
 	dr := &d.Drafts[d.ActiveTab]
 	typeSomethingIdx := len(q.Options)
@@ -381,8 +389,15 @@ func (m *MainUIModel) HandleAskUserKey(msg tea.KeyMsg) bool {
 			return true
 		}
 		if q.MultiSelect {
-			if dr.Cursor == maxRow { // Next
-				d.ActiveTab++
+			if dr.Cursor == maxRow { // Next / Submit
+				if len(d.Questions) <= 1 {
+					d.finish(false)
+					m.resizeAllBuffers()
+					return true
+				}
+				if d.ActiveTab < d.totalTabs()-1 {
+					d.ActiveTab++
+				}
 				return true
 			}
 			dr.MultiChecked[dr.Cursor] = !dr.MultiChecked[dr.Cursor]
@@ -497,8 +512,15 @@ func RenderAskUserDialog(d *AskUserDialogState, width int, t Theme) string {
 			}
 		}
 	} else {
-		q := d.Questions[d.ActiveTab]
-		dr := d.Drafts[d.ActiveTab]
+		if len(d.Questions) == 0 {
+			return ""
+		}
+		tabIdx := d.ActiveTab
+		if tabIdx < 0 || tabIdx >= len(d.Questions) {
+			tabIdx = 0
+		}
+		q := d.Questions[tabIdx]
+		dr := d.Drafts[tabIdx]
 
 		chip := ""
 		if q.Header != "" {
@@ -560,7 +582,11 @@ func RenderAskUserDialog(d *AskUserDialogState, width int, t Theme) string {
 			if dr.Cursor == tsIdx+1 {
 				nextSel = t.BoldFg(t.Accent, "› ")
 			}
-			optRows = append(optRows, nextSel+t.BoldFg(t.Success, "→ Next"))
+			nextLbl := "→ Next"
+			if len(d.Questions) <= 1 {
+				nextLbl = "✓ Submit"
+			}
+			optRows = append(optRows, nextSel+t.BoldFg(t.Success, nextLbl))
 		}
 
 		// Preview rendering (side-by-side if >=100 cols, stacked below otherwise)
