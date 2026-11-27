@@ -186,10 +186,12 @@ func executeSingleTool(
 		}()
 
 		toolCtx := &tools.ToolContext{
-			Context:   ctx,
-			AgentID:   a.id,
-			Cwd:       a.GetCwd(),
-			EventChan: evCh,
+			Context:    ctx,
+			AgentID:    a.id,
+			SessionID:  a.SessionID(),
+			IsSubagent: a.IsSubagent(),
+			Cwd:        a.GetCwd(),
+			EventChan:  evCh,
 		}
 		res, execErr := targetTool.Execute(toolCtx, call.Function.Arguments)
 		close(evCh)

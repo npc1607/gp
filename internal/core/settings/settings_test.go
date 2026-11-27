@@ -487,3 +487,48 @@ func TestSettings_EnvVarTableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestManager_UpdateGlobal_DoesNotLeakProjectOrEnvSettings(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("GP_API_KEY", "env-secret-key")
+	t.Setenv("GP_MODEL", "env-model")
+
+	tmpHome := t.TempDir()
+	tmpCwd := t.TempDir()
+	mgr := NewManagerWithPaths(tmpCwd, tmpHome)
+
+	// 全局原有配置仅含 model 与 global api_key
+	if err := os.MkdirAll(filepath.Dir(mgr.GlobalPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mgr.GlobalPath(), []byte(`{"model": "global-model", "api_key": "global-kept-key"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 项目级配置含高危开关与项目密钥
+	if err := os.MkdirAll(filepath.Dir(mgr.ProjectPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mgr.ProjectPath(), []byte(`{"api_key": "project-secret", "extension_allow_destructive": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.UpdateGlobal(func(g *Settings) {
+		g.DisabledExtensions = []string{"heavy-mcp"}
+	}); err != nil {
+		t.Fatalf("UpdateGlobal failed: %v", err)
+	}
+
+	globalOnly, err := mgr.LoadGlobalOnly()
+	if err != nil {
+		t.Fatalf("LoadGlobalOnly failed: %v", err)
+	}
+	if globalOnly.Model != "global-model" || globalOnly.APIKey != "global-kept-key" {
+		t.Fatalf("UpdateGlobal polluted global model/api_key: %+v", globalOnly)
+	}
+	if globalOnly.ExtensionAllowDestructive {
+		t.Fatalf("UpdateGlobal leaked project extension_allow_destructive into global settings!")
+	}
+	if !reflect.DeepEqual(globalOnly.DisabledExtensions, []string{"heavy-mcp"}) {
+		t.Fatalf("expected DisabledExtensions=[heavy-mcp], got %v", globalOnly.DisabledExtensions)
+	}
+}

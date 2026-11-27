@@ -19,6 +19,7 @@ var BuiltinSlashCommands = []SlashCommand{
 	{Name: "/compact", Usage: "/compact [focus]", Description: "手动压缩上下文历史，释放上下文窗口空间"},
 	{Name: "/skills", Usage: "/skills [enable|disable|remove|add <name|dir>]", Description: "查看已发现的 Skill（Space 启停，Ctrl+D 取消注册）"},
 	{Name: "/mcp", Usage: "/mcp [enable|disable|remove <name>]", Description: "查看已配置的 MCP Server（Space 启停，Ctrl+D 取消注册）"},
+	{Name: "/ext", Usage: "/ext [reload|enable|disable|test <name>]", Description: "统一管理外部工具能力包（Space 启停，Ctrl+T 探测连通性，Ctrl+R 热重载）"},
 	{Name: "/login", Usage: "/login [qoder|deepseek]", Description: "登录并保存 Provider 凭证到 ~/.gp/auth.db"},
 	{Name: "/logout", Usage: "/logout [provider]", Description: "注销并清除已保存的 Provider 凭证"},
 	{Name: "/zentui", Usage: "/zentui preset opencode|rail|minimalist", Description: "实时切换编辑器、用户消息与状态栏样式预设"},

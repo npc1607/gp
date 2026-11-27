@@ -127,4 +127,53 @@ func TestTUI_SkillsAndMCPOverlaySpaceToggle(t *testing.T) {
 	if !m.handleLocalCommand("/skills remove git-commit") || !skillRemoved {
 		t.Fatalf("expected /skills remove git-commit to unregister skill")
 	}
+
+	// /ext 打开统一外部能力包管理弹层，支持 Space 启停、Ctrl+T 探测与 Ctrl+R 热重载
+	extEnabled := true
+	reloaded := false
+	tested := false
+	m.SetResourceHandlers(ResourceHandlers{
+		ListExtensions: func() ([]ExtensionStatusItem, error) {
+			state := "ready"
+			if !extEnabled {
+				state = "disabled"
+			}
+			return []ExtensionStatusItem{
+				{Name: "data-test-platform", Description: "log & sql platform", AdapterType: "http", Source: "project", Enabled: extEnabled, ActionCount: 5, State: state},
+			}, nil
+		},
+		ToggleExtension: func(name string, enable bool) error {
+			extEnabled = enable
+			return nil
+		},
+		ReloadExtensions: func() ([]ExtensionStatusItem, error) {
+			reloaded = true
+			return []ExtensionStatusItem{
+				{Name: "data-test-platform", Description: "log & sql platform", AdapterType: "http", Source: "project", Enabled: extEnabled, ActionCount: 5, State: "ready"},
+			}, nil
+		},
+		TestExtension: func(name string) error {
+			tested = true
+			return nil
+		},
+	})
+	if !m.handleLocalCommand("/ext") || m.overlay.Kind != OverlayExtSelect {
+		t.Fatalf("expected /ext to open OverlayExtSelect, got %v", m.overlay.Kind)
+	}
+	m.HandleOverlayKey(tea.KeyMsg{Type: tea.KeySpace})
+	if extEnabled {
+		t.Fatalf("expected Space in /ext overlay to disable extension")
+	}
+	m.HandleOverlayKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if !tested {
+		t.Fatalf("expected Ctrl+T in /ext overlay to run TestExtension")
+	}
+	m.HandleOverlayKey(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if !reloaded {
+		t.Fatalf("expected Ctrl+R in /ext overlay to run ReloadExtensions")
+	}
+	m.HandleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.overlay.Kind != OverlayNone {
+		t.Fatalf("expected Esc to close /ext overlay")
+	}
 }

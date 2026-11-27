@@ -25,15 +25,31 @@ type MCPStatusItem struct {
 	ToolCount int
 }
 
-// ResourceHandlers 封装 /skills 与 /mcp 指令所需的查询与启停、取消注册回调
+// ExtensionStatusItem 描述一个统一 Extension 能力包的展示与运行状态
+type ExtensionStatusItem struct {
+	Name        string
+	Description string
+	AdapterType string // guide | cli | script | http | openapi | mcp
+	Source      string // global | custom | project | legacy-skill | legacy-mcp
+	Enabled     bool
+	ActionCount int
+	State       string // ready | running | idle | disabled | error
+	LoadError   string
+}
+
+// ResourceHandlers 封装 /skills、/mcp 与 /ext 指令所需的查询、启停与热重载回调
 type ResourceHandlers struct {
-	ListSkills      func() ([]SkillStatusItem, error)
-	ToggleSkill     func(name string, enable bool) error
-	AddSkillDir     func(dir string) error
-	UnregisterSkill func(name string) error
-	ListMCPs        func() ([]MCPStatusItem, error)
-	ToggleMCP       func(name string, enable bool) error
-	UnregisterMCP   func(name string) error
+	ListSkills       func() ([]SkillStatusItem, error)
+	ToggleSkill      func(name string, enable bool) error
+	AddSkillDir      func(dir string) error
+	UnregisterSkill  func(name string) error
+	ListMCPs         func() ([]MCPStatusItem, error)
+	ToggleMCP        func(name string, enable bool) error
+	UnregisterMCP    func(name string) error
+	ListExtensions   func() ([]ExtensionStatusItem, error)
+	ToggleExtension  func(name string, enable bool) error
+	ReloadExtensions func() ([]ExtensionStatusItem, error)
+	TestExtension    func(name string) error
 }
 
 // SetResourceHandlers 注册 /skills 与 /mcp 指令处理器
@@ -149,5 +165,78 @@ func (m *MainUIModel) handleMCPCommand(fields []string) bool {
 	m.overlay.Close()
 	m.overlay.Kind = OverlayMCPSelect
 	m.overlay.MCPs = items
+	return true
+}
+
+func (m *MainUIModel) handleExtCommand(fields []string) bool {
+	if len(fields) >= 2 {
+		sub := strings.ToLower(fields[1])
+		switch sub {
+		case "reload":
+			if m.resourceHandlers.ReloadExtensions == nil {
+				m.addSystemNotice("Extension reload is unavailable in current mode.", true)
+				return true
+			}
+			items, err := m.resourceHandlers.ReloadExtensions()
+			if err != nil {
+				m.addSystemNotice(fmt.Sprintf("Reload extensions failed: %v", err), true)
+				return true
+			}
+			m.addSystemNotice(fmt.Sprintf("✓ Reloaded %d extension(s)", len(items)), false)
+			return true
+
+		case "enable", "disable":
+			if len(fields) < 3 {
+				m.addSystemNotice(fmt.Sprintf("Usage: /ext %s <name>", sub), true)
+				return true
+			}
+			if m.resourceHandlers.ToggleExtension == nil {
+				m.addSystemNotice("Extension toggle is unavailable in current mode.", true)
+				return true
+			}
+			target := strings.TrimSpace(strings.Join(fields[2:], " "))
+			enable := sub == "enable"
+			if err := m.resourceHandlers.ToggleExtension(target, enable); err != nil {
+				m.addSystemNotice(fmt.Sprintf("Extension %s failed: %v", sub, err), true)
+				return true
+			}
+			state := "disabled"
+			if enable {
+				state = "enabled"
+			}
+			m.addSystemNotice(fmt.Sprintf("✓ Extension %q %s", target, state), false)
+			return true
+
+		case "test", "check":
+			if len(fields) < 3 {
+				m.addSystemNotice("Usage: /ext test <name>", true)
+				return true
+			}
+			if m.resourceHandlers.TestExtension == nil {
+				m.addSystemNotice("Extension healthcheck is unavailable in current mode.", true)
+				return true
+			}
+			target := strings.TrimSpace(strings.Join(fields[2:], " "))
+			if err := m.resourceHandlers.TestExtension(target); err != nil {
+				m.addSystemNotice(fmt.Sprintf("✗ Extension %q healthcheck failed: %v", target, err), true)
+				return true
+			}
+			m.addSystemNotice(fmt.Sprintf("✓ Extension %q is healthy", target), false)
+			return true
+		}
+	}
+
+	if m.resourceHandlers.ListExtensions == nil {
+		m.addSystemNotice("Extension listing is unavailable in current mode.", true)
+		return true
+	}
+	items, err := m.resourceHandlers.ListExtensions()
+	if err != nil {
+		m.addSystemNotice(fmt.Sprintf("List extensions failed: %v", err), true)
+		return true
+	}
+	m.overlay.Close()
+	m.overlay.Kind = OverlayExtSelect
+	m.overlay.Extensions = items
 	return true
 }

@@ -13,6 +13,8 @@ import (
 type ToolContext struct {
 	context.Context
 	AgentID      string
+	SessionID    string
+	IsSubagent   bool
 	Cwd          string
 	Env          map[string]string
 	AllowedPaths []string

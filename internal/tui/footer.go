@@ -490,29 +490,40 @@ func (f *FooterState) ListSegments() []StatusSegment {
 func (f *FooterState) ApplyContextMetrics(m ContextMetricsMsg) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.MetricsReady = true
-	f.TurnIndex = m.TurnIndex
-	if m.StrategyMode != "" {
-		f.StrategyMode = m.StrategyMode
+	if m.TurnIndex > 0 || m.StrategyMode != "" || m.InputTokens > 0 || m.EpochID > 0 || m.LedgerVersion > 0 {
+		f.MetricsReady = true
+		f.TurnIndex = m.TurnIndex
+		if m.StrategyMode != "" {
+			f.StrategyMode = m.StrategyMode
+		}
+		f.EpochID = m.EpochID
+		f.EpochMaskedCount = m.EpochMaskedCount
+		f.LedgerVersion = m.LedgerVersion
+		f.LedgerActiveCnt = m.LedgerActiveCnt
+		f.LedgerSuperseded = m.LedgerSuperseded
+		f.WorkingSetTokens = m.WorkingSetTokens
+		f.WorkingSetEntries = m.WorkingSetEntries
+		f.GraphMatchedEntities = m.GraphMatchedEntities
+		f.ContextBuildMs = m.ContextBuildMs
+		f.RetrievalBuildMs = m.RetrievalBuildMs
+		if m.InputTokens > 0 {
+			f.LastInputTokens = m.InputTokens
+		}
+		f.CacheReadTokens = m.CacheReadTokens
+		f.CacheWriteTokens = m.CacheWriteTokens
 	}
-	f.EpochID = m.EpochID
-	f.EpochMaskedCount = m.EpochMaskedCount
-	f.LedgerVersion = m.LedgerVersion
-	f.LedgerActiveCnt = m.LedgerActiveCnt
-	f.LedgerSuperseded = m.LedgerSuperseded
-	f.WorkingSetTokens = m.WorkingSetTokens
-	f.WorkingSetEntries = m.WorkingSetEntries
-	f.GraphMatchedEntities = m.GraphMatchedEntities
-	f.ContextBuildMs = m.ContextBuildMs
-	f.RetrievalBuildMs = m.RetrievalBuildMs
-	if m.InputTokens > 0 {
-		f.LastInputTokens = m.InputTokens
+	if m.HasTotals {
+		f.TotalRecallCalls = m.TotalRecallCalls
+		f.TotalRestoreCalls = m.TotalRestoreCalls
+		f.TotalSearchCalls = m.TotalSearchCalls
+	} else {
+		f.TotalRecallCalls += m.RecallCalls
+		f.TotalRestoreCalls += m.RestoreCalls
+		f.TotalSearchCalls += m.SearchCalls
 	}
-	f.CacheReadTokens = m.CacheReadTokens
-	f.CacheWriteTokens = m.CacheWriteTokens
-	f.TotalRecallCalls += m.RecallCalls
-	f.TotalRestoreCalls += m.RestoreCalls
-	f.TotalSearchCalls += m.SearchCalls
+	if m.HasCompactionCount {
+		f.CompactionCount = m.CompactionCount
+	}
 }
 
 // RecordCompaction 记录一次成功的上下文压缩事件

@@ -82,6 +82,13 @@ type ContextMetricsMsg struct {
 	RecallCalls          int
 	RestoreCalls         int
 	SearchCalls          int
+	// 来自 SQLite / SessionTree 的会话级权威累计值（覆盖自动压缩与 /resume 断点恢复）
+	HasTotals          bool
+	TotalRecallCalls   int
+	TotalRestoreCalls  int
+	TotalSearchCalls   int
+	HasCompactionCount bool
+	CompactionCount    int
 }
 
 // AgentStatusChangedMsg Agent 状态跃迁通知 (状态机变化、工具调用)

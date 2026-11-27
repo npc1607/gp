@@ -197,6 +197,13 @@ func (a *AgentInstance) Compact(ctx context.Context, focus string) (*compaction.
 
 	if res.Summary != "" {
 		st.AppendCompaction(res.Summary, res.KeptMessages)
+		// 自动压缩与手动压缩完成后立即同步最新压缩次数到底部状态栏
+		a.EmitEvent(AgentEvent{
+			Type:            EventContextMetrics,
+			AgentID:         a.id,
+			CompactionCount: st.CompactionCount(),
+			Timestamp:       time.Now(),
+		})
 	}
 	return res, nil
 }
@@ -813,12 +820,24 @@ func (a *AgentInstance) recordTurnContextMetric(
 		CreatedAt:            time.Now(),
 	}
 
+	var totalsPtr *storage.ContextMetricTotals
 	if metricStore, ok := store.(storage.ContextMetricStore); ok && sessID != "" {
 		recCtx := ctx
 		if recCtx == nil || recCtx.Err() != nil {
 			recCtx = context.Background()
 		}
 		_ = metricStore.RecordContextMetric(recCtx, metric)
+		if totals, tErr := metricStore.GetContextMetricTotals(sessID); tErr == nil {
+			totalsPtr = &totals
+		}
+	}
+
+	a.mu.RLock()
+	st := a.sessionTree
+	a.mu.RUnlock()
+	compactionCnt := 0
+	if st != nil {
+		compactionCnt = st.CompactionCount()
 	}
 
 	slog.Info("[ctx_metrics]",
@@ -852,11 +871,13 @@ func (a *AgentInstance) recordTurnContextMetric(
 	)
 
 	a.EmitEvent(AgentEvent{
-		Type:          EventContextMetrics,
-		AgentID:       a.id,
-		Turn:          turnIndex,
-		ContextMetric: metric,
-		Timestamp:     metric.CreatedAt,
+		Type:            EventContextMetrics,
+		AgentID:         a.id,
+		Turn:            turnIndex,
+		ContextMetric:   metric,
+		ContextTotals:   totalsPtr,
+		CompactionCount: compactionCnt,
+		Timestamp:       metric.CreatedAt,
 	})
 }
 

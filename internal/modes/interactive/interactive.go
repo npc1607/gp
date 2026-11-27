@@ -22,6 +22,7 @@ import (
 	"gp/internal/core/settings"
 	"gp/internal/core/storage"
 	"gp/internal/core/storage/sqlite"
+	"gp/internal/extensions"
 	"gp/internal/extensions/js"
 	"gp/internal/mcp"
 	"gp/internal/modes/subagent"
@@ -220,10 +221,100 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		resLoader.SetDisabledSkills(cfg.DisabledSkills)
 		resLoader.SetUnregisteredSkills(cfg.UnregisteredSkills)
 	}
-	sysPrompt := resLoader.BuildSystemPrompt(cfg.SystemPrompt)
-	if sysPrompt != "" {
-		ag.SetSystemPrompt(sysPrompt)
+
+	// 初始化统一外部能力注册中心（Extension / ToolPack）：统一托管 extension.yaml 与懒加载 MCP 桥接
+	buildExtLoadOptions := func() extensions.LoadOptions {
+		var legacyMCPCfg *mcp.Config
+		if !cfg.IsLegacyExtensionMode() {
+			legacyMCPCfg, _ = mcp.DiscoverConfig(cwd, homeDir)
+		}
+		var extDirs, disabledExts, disabledMCPsCfg []string
+		if cfg != nil {
+			extDirs = append([]string(nil), cfg.ExtensionDirs...)
+			disabledExts = append([]string(nil), cfg.DisabledExtensions...)
+			disabledMCPsCfg = append([]string(nil), cfg.DisabledMCPs...)
+		}
+		return extensions.LoadOptions{
+			Cwd:                cwd,
+			HomeDir:            homeDir,
+			ExtraDirs:          extDirs,
+			DisabledExtensions: disabledExts,
+			BridgeLegacyMCP:    legacyMCPCfg,
+			DisabledMCPs:       disabledMCPsCfg,
+		}
 	}
+
+	allowDestructive := cfg != nil && cfg.ExtensionAllowDestructive
+	extReg := extensions.NewRegistry(extensions.RegistryConfig{
+		Load:             buildExtLoadOptions(),
+		AuthStore:        authStore,
+		AllowDestructive: allowDestructive,
+		ConfirmFn: func(confirmCtx context.Context, extName, actionName string, args map[string]any) (bool, error) {
+			respCh := make(chan tui.AskUserResult, 1)
+			argsHint := ""
+			if len(args) > 0 {
+				var parts []string
+				for k, v := range args {
+					parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+				}
+				slices.Sort(parts)
+				joined := strings.Join(parts, ", ")
+				if len(joined) > 160 {
+					joined = joined[:160] + "…"
+				}
+				argsHint = " (" + joined + ")"
+			}
+			sent := tools.SendUIEvent(tui.AskUserQuestionMsg{
+				Questions: []tui.AskUserQuestion{
+					{
+						Header:   "Destructive Ext",
+						Question: fmt.Sprintf("Allow destructive extension action %s.%s%s?", extName, actionName, argsHint),
+						Options: []tui.AskUserOption{
+							{Label: "Deny", Description: "Block this destructive action (safe default)"},
+							{Label: "Allow", Description: fmt.Sprintf("Proceed executing %s.%s", extName, actionName)},
+						},
+					},
+				},
+				ResponseCh: respCh,
+			})
+			if !sent {
+				return false, nil
+			}
+			select {
+			case res := <-respCh:
+				if res.Cancelled {
+					return false, nil
+				}
+				for _, ans := range res.Answers {
+					if ans.Answer == "Allow" || slices.Contains(ans.Selected, "Allow") {
+						return true, nil
+					}
+				}
+				return false, nil
+			case <-confirmCtx.Done():
+				return false, confirmCtx.Err()
+			}
+		},
+	})
+	defer extReg.CloseAll()
+
+	allowExtDescribe := len(r.opts.ToolAllowlist) == 0 || slices.Contains(r.opts.ToolAllowlist, "ext_describe")
+	allowExtCall := len(r.opts.ToolAllowlist) == 0 || slices.Contains(r.opts.ToolAllowlist, "ext_call")
+	if len(extReg.ListStatus()) > 0 {
+		_ = extensions.RegisterFilteredTools(reg, extReg, allowExtDescribe, allowExtCall)
+	}
+
+	rebuildSystemPrompt := func() {
+		parts := []string{}
+		if base := strings.TrimSpace(resLoader.BuildSystemPrompt(cfg.SystemPrompt)); base != "" {
+			parts = append(parts, base)
+		}
+		if extDir := strings.TrimSpace(extReg.RenderDirectoryPrompt()); extDir != "" {
+			parts = append(parts, extDir)
+		}
+		ag.SetSystemPrompt(strings.Join(parts, "\n\n"))
+	}
+	rebuildSystemPrompt()
 	if store != nil {
 		st, err := session.NewSessionTree(sessID, store)
 		if err == nil {
@@ -296,30 +387,39 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 				})
 			}
 		case agent.EventContextMetrics:
+			msg := tui.ContextMetricsMsg{
+				HasCompactionCount: true,
+				CompactionCount:    ev.CompactionCount,
+			}
 			if ev.ContextMetric != nil {
 				cm := ev.ContextMetric
-				p.Send(tui.ContextMetricsMsg{
-					TurnIndex:            cm.TurnIndex,
-					StrategyMode:         cm.StrategyMode,
-					EpochID:              cm.EpochID,
-					EpochMaskedCount:     cm.EpochMaskedCount,
-					LedgerVersion:        cm.LedgerVersion,
-					LedgerActiveCnt:      cm.LedgerActiveCnt,
-					LedgerSuperseded:     cm.LedgerSuperseded,
-					WorkingSetTokens:     cm.WorkingSetTokens,
-					WorkingSetEntries:    cm.WorkingSetEntries,
-					GraphMatchedEntities: cm.GraphMatchedEntities,
-					ContextBuildMs:       cm.ContextBuildMs,
-					RetrievalBuildMs:     cm.RetrievalBuildMs,
-					InputTokens:          cm.InputTokens,
-					CacheReadTokens:      cm.CacheReadTokens,
-					CacheWriteTokens:     cm.CacheWriteTokens,
-					OutputTokens:         cm.OutputTokens,
-					RecallCalls:          cm.RecallCalls,
-					RestoreCalls:         cm.RestoreCalls,
-					SearchCalls:          cm.SearchCalls,
-				})
+				msg.TurnIndex = cm.TurnIndex
+				msg.StrategyMode = cm.StrategyMode
+				msg.EpochID = cm.EpochID
+				msg.EpochMaskedCount = cm.EpochMaskedCount
+				msg.LedgerVersion = cm.LedgerVersion
+				msg.LedgerActiveCnt = cm.LedgerActiveCnt
+				msg.LedgerSuperseded = cm.LedgerSuperseded
+				msg.WorkingSetTokens = cm.WorkingSetTokens
+				msg.WorkingSetEntries = cm.WorkingSetEntries
+				msg.GraphMatchedEntities = cm.GraphMatchedEntities
+				msg.ContextBuildMs = cm.ContextBuildMs
+				msg.RetrievalBuildMs = cm.RetrievalBuildMs
+				msg.InputTokens = cm.InputTokens
+				msg.CacheReadTokens = cm.CacheReadTokens
+				msg.CacheWriteTokens = cm.CacheWriteTokens
+				msg.OutputTokens = cm.OutputTokens
+				msg.RecallCalls = cm.RecallCalls
+				msg.RestoreCalls = cm.RestoreCalls
+				msg.SearchCalls = cm.SearchCalls
 			}
+			if ev.ContextTotals != nil {
+				msg.HasTotals = true
+				msg.TotalRecallCalls = ev.ContextTotals.TotalRecallCalls
+				msg.TotalRestoreCalls = ev.ContextTotals.TotalRestoreCalls
+				msg.TotalSearchCalls = ev.ContextTotals.TotalSearchCalls
+			}
+			p.Send(msg)
 		}
 	})
 
@@ -428,7 +528,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 				resLoader.SetUnregisteredSkills(cfg.UnregisteredSkills)
 			}
 			resLoader.SetDisabledSkills(cfg.DisabledSkills)
-			ag.SetSystemPrompt(resLoader.BuildSystemPrompt(cfg.SystemPrompt))
+			rebuildSystemPrompt()
 			return settings.NewManager(cwd).SaveGlobal(*cfg)
 		},
 		AddSkillDir: func(dir string) error {
@@ -436,7 +536,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 				cfg.SkillDirs = append(cfg.SkillDirs, dir)
 			}
 			resLoader.SetExtraSkillDirs(cfg.SkillDirs)
-			ag.SetSystemPrompt(resLoader.BuildSystemPrompt(cfg.SystemPrompt))
+			rebuildSystemPrompt()
 			return settings.NewManager(cwd).SaveGlobal(*cfg)
 		},
 		UnregisterSkill: func(name string) error {
@@ -460,7 +560,7 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 			cfg.DisabledSkills = updateDisabledList(cfg.DisabledSkills, name, true)
 			resLoader.SetUnregisteredSkills(cfg.UnregisteredSkills)
 			resLoader.SetDisabledSkills(cfg.DisabledSkills)
-			ag.SetSystemPrompt(resLoader.BuildSystemPrompt(cfg.SystemPrompt))
+			rebuildSystemPrompt()
 			return settings.NewManager(cwd).SaveGlobal(*cfg)
 		},
 		ListMCPs: func() ([]tui.MCPStatusItem, error) {
@@ -484,7 +584,13 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 		},
 		ToggleMCP: func(name string, enable bool) error {
 			cfg.DisabledMCPs = updateDisabledList(cfg.DisabledMCPs, name, enable)
-			return settings.NewManager(cwd).SaveGlobal(*cfg)
+			if !cfg.IsLegacyExtensionMode() {
+				extReg.ReloadWithOptions(buildExtLoadOptions())
+				rebuildSystemPrompt()
+			}
+			return saveGlobalSettingsField(r.opts.SettingsMgr, cwd, func(g *settings.Settings) {
+				g.DisabledMCPs = append([]string(nil), cfg.DisabledMCPs...)
+			})
 		},
 		UnregisterMCP: func(name string) error {
 			if err := mcp.RemoveServerConfig(cwd, homeDir, name); err != nil {
@@ -497,7 +603,55 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 					c.ServerName = ""
 				}
 			}
-			return settings.NewManager(cwd).SaveGlobal(*cfg)
+			if !cfg.IsLegacyExtensionMode() {
+				extReg.ReloadWithOptions(buildExtLoadOptions())
+				rebuildSystemPrompt()
+			}
+			return saveGlobalSettingsField(r.opts.SettingsMgr, cwd, func(g *settings.Settings) {
+				g.DisabledMCPs = append([]string(nil), cfg.DisabledMCPs...)
+			})
+		},
+		ListExtensions: func() ([]tui.ExtensionStatusItem, error) {
+			return toTUIExtensions(extReg.ListStatus()), nil
+		},
+		ToggleExtension: func(name string, enable bool) error {
+			if !extReg.SetEnabled(name, enable) {
+				return fmt.Errorf("extension %q not found or has manifest error", name)
+			}
+			cfg.DisabledExtensions = updateDisabledList(cfg.DisabledExtensions, name, enable)
+			rebuildSystemPrompt()
+			return saveGlobalSettingsField(r.opts.SettingsMgr, cwd, func(g *settings.Settings) {
+				g.DisabledExtensions = append([]string(nil), cfg.DisabledExtensions...)
+			})
+		},
+		ReloadExtensions: func() ([]tui.ExtensionStatusItem, error) {
+			extReg.ReloadWithOptions(buildExtLoadOptions())
+			if len(extReg.ListStatus()) > 0 {
+				_ = extensions.RegisterFilteredTools(reg, extReg, allowExtDescribe, allowExtCall)
+			}
+			rebuildSystemPrompt()
+			return toTUIExtensions(extReg.ListStatus()), nil
+		},
+		TestExtension: func(name string) error {
+			tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			return extReg.HealthCheck(tctx, name)
+		},
+	})
+
+	uiModel.RegisterStatusSegment(tui.StatusSegment{
+		ID:          "ext",
+		Description: "已启用的外部工具能力包数量 (ext:N)",
+		Side:        tui.StatusSideRight,
+		Priority:    42,
+		Order:       65,
+		Enabled:     true,
+		Render: func(_ tui.FooterSnapshot, t tui.Theme, _ tui.UIConfig) string {
+			cnt := extReg.EnabledCount()
+			if cnt <= 0 {
+				return ""
+			}
+			return t.Fg(t.SyntaxOperator, fmt.Sprintf("ext:%d", cnt))
 		},
 	})
 
@@ -525,6 +679,41 @@ func (r *Runner) Run(ctx context.Context, initialPrompt string) error {
 					return nil, err
 				}
 				ag.SetSessionTree(st)
+				// 从 SQLite & SessionTree 回填历史会话的上下文指标（累计压缩次数、累计召回/检索次数、最近轮次快照）
+				if f := uiModel.Footer(); f != nil {
+					syncMsg := tui.ContextMetricsMsg{
+						HasCompactionCount: true,
+						CompactionCount:    st.CompactionCount(),
+					}
+					if metricStore, ok := store.(storage.ContextMetricStore); ok {
+						if totals, tErr := metricStore.GetContextMetricTotals(sessionID); tErr == nil {
+							syncMsg.HasTotals = true
+							syncMsg.TotalRecallCalls = totals.TotalRecallCalls
+							syncMsg.TotalRestoreCalls = totals.TotalRestoreCalls
+							syncMsg.TotalSearchCalls = totals.TotalSearchCalls
+						}
+						if recent, lErr := metricStore.ListContextMetrics(sessionID, 1); lErr == nil && len(recent) > 0 {
+							cm := recent[len(recent)-1]
+							syncMsg.TurnIndex = cm.TurnIndex
+							syncMsg.StrategyMode = cm.StrategyMode
+							syncMsg.EpochID = cm.EpochID
+							syncMsg.EpochMaskedCount = cm.EpochMaskedCount
+							syncMsg.LedgerVersion = cm.LedgerVersion
+							syncMsg.LedgerActiveCnt = cm.LedgerActiveCnt
+							syncMsg.LedgerSuperseded = cm.LedgerSuperseded
+							syncMsg.WorkingSetTokens = cm.WorkingSetTokens
+							syncMsg.WorkingSetEntries = cm.WorkingSetEntries
+							syncMsg.GraphMatchedEntities = cm.GraphMatchedEntities
+							syncMsg.ContextBuildMs = cm.ContextBuildMs
+							syncMsg.RetrievalBuildMs = cm.RetrievalBuildMs
+							syncMsg.InputTokens = cm.InputTokens
+							syncMsg.CacheReadTokens = cm.CacheReadTokens
+							syncMsg.CacheWriteTokens = cm.CacheWriteTokens
+							syncMsg.OutputTokens = cm.OutputTokens
+						}
+					}
+					f.ApplyContextMetrics(syncMsg)
+				}
 				return st.GetLinearContext(), nil
 			},
 		)
@@ -688,13 +877,45 @@ func (r *Runner) resolveRegistryWithClients(cwd string, cfg *settings.Settings) 
 	if cfg != nil {
 		disabledMCPs = cfg.DisabledMCPs
 	}
-	clients, _ := mcp.AutoConnectAndRegisterWithDisabled(context.Background(), cwd, homeDir, reg, disabledMCPs)
+	if cfg.IsLegacyExtensionMode() {
+		clients, _ := mcp.AutoConnectAndRegisterWithDisabled(context.Background(), cwd, homeDir, reg, disabledMCPs)
+		_, _ = js.LoadExtensions(cwd, homeDir, reg)
+		if len(r.opts.ToolAllowlist) > 0 {
+			reg = reg.ScopedRegistry(r.opts.ToolAllowlist)
+		}
+		return reg, clients, nil
+	}
 	_, _ = js.LoadExtensions(cwd, homeDir, reg)
 
 	if len(r.opts.ToolAllowlist) > 0 {
 		reg = reg.ScopedRegistry(r.opts.ToolAllowlist)
 	}
-	return reg, clients, nil
+	return reg, nil, nil
+}
+
+func toTUIExtensions(list []extensions.ExtensionStatus) []tui.ExtensionStatusItem {
+	out := make([]tui.ExtensionStatusItem, 0, len(list))
+	for _, st := range list {
+		out = append(out, tui.ExtensionStatusItem{
+			Name:        st.Name,
+			Description: st.Description,
+			AdapterType: st.AdapterType,
+			Source:      st.Source,
+			Enabled:     st.Enabled,
+			ActionCount: st.ActionCount,
+			State:       st.State,
+			LoadError:   st.LoadError,
+		})
+	}
+	return out
+}
+
+// saveGlobalSettingsField 仅对全局 ~/.gp/settings.json 的目标字段做增量更新，绝不引入项目级或环境变量覆写值
+func saveGlobalSettingsField(mgr *settings.Manager, cwd string, mutate func(g *settings.Settings)) error {
+	if mgr == nil {
+		mgr = settings.NewManager(cwd)
+	}
+	return mgr.UpdateGlobal(mutate)
 }
 
 func updateDisabledList(list []string, name string, enable bool) []string {

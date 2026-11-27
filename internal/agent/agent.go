@@ -42,10 +42,12 @@ type AgentEvent struct {
 	IsError       bool
 	Stalled       bool
 	Duration      time.Duration
-	Usage         *ai.TokenUsage
-	ContextMetric *storage.ContextMetric
-	Outcome       string
-	Timestamp     time.Time
+	Usage           *ai.TokenUsage
+	ContextMetric   *storage.ContextMetric
+	ContextTotals   *storage.ContextMetricTotals
+	CompactionCount int
+	Outcome         string
+	Timestamp       time.Time
 }
 
 // Status Agent 生命周期状态机
@@ -66,6 +68,7 @@ const (
 type AgentInstance struct {
 	id            string
 	roleName      string
+	isSubagent    bool
 	status        atomic.Pointer[Status]
 	sessionTree   *session.SessionTree
 	toolReg       *tools.Registry
@@ -261,6 +264,20 @@ func (a *AgentInstance) SetEventHandler(h func(ev AgentEvent)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.eventHandler = h
+}
+
+// SetSubagent 标记当前 Agent 是否为派生子 Agent（供工具与扩展安全策略精准判定）
+func (a *AgentInstance) SetSubagent(v bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.isSubagent = v
+}
+
+// IsSubagent 返回当前 Agent 是否为派生子 Agent
+func (a *AgentInstance) IsSubagent() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.isSubagent
 }
 
 func (a *AgentInstance) EmitEvent(ev AgentEvent) {

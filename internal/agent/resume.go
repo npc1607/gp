@@ -124,9 +124,10 @@ func Resume(ctx context.Context, opts ResumeOptions) (*ResumeResult, error) {
 				if opts.Registry != nil {
 					if targetTool, ok := opts.Registry.Get(toolCp.ToolName); ok {
 						toolCtx := &tools.ToolContext{
-							Context: ctx,
-							AgentID: targetSessionID,
-							Cwd:     cwd,
+							Context:   ctx,
+							AgentID:   targetSessionID,
+							SessionID: targetSessionID,
+							Cwd:       cwd,
 						}
 						res, execErr := targetTool.Execute(toolCtx, toolCp.Arguments)
 						if execErr != nil {

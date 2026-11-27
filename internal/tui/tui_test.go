@@ -921,6 +921,21 @@ func TestTUI_StatuslineRegisterableSegmentsAndContextMetrics(t *testing.T) {
 		}
 	}
 
+	// 2.6 自动压缩与 /resume 回填的权威累计计数（HasTotals + HasCompactionCount）应准确渲染 cmp:3 与 recall:1
+	_, _ = mFresh.Update(ContextMetricsMsg{
+		TurnIndex:          141,
+		HasTotals:          true,
+		TotalSearchCalls:   1,
+		HasCompactionCount: true,
+		CompactionCount:    3,
+	})
+	resumedView := ansi.Strip(mFresh.footer.Render(180, mFresh.theme, mFresh.config))
+	for _, want := range []string{"T:141", "cmp:3", "recall:1"} {
+		if !strings.Contains(resumedView, want) {
+			t.Fatalf("expected resumed/auto-compacted statusline to render %q, got:\n%s", want, resumedView)
+		}
+	}
+
 	// 3. 窄终端下按 Priority 自动优雅隐藏低优先级指标，保留核心 ctx 与 cache
 	narrowView := ansi.Strip(m.footer.Render(56, m.theme, m.config))
 	if !strings.Contains(narrowView, "ctx: 8.0k/1.00M") {
@@ -1020,6 +1035,46 @@ func TestTUI_MouseDragSelectionAndCopyCommands(t *testing.T) {
 	}
 	if m.pendingCmd == nil {
 		t.Fatalf("expected pending tea.DisableMouse cmd after '/mouse off'")
+	}
+}
+
+func TestTUI_AskUser_SingleMultiSelectSubmitDoesNotPanic(t *testing.T) {
+	m := createTestMainUIModel(t, nil)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	respCh := make(chan AskUserResult, 1)
+	_, _ = m.Update(AskUserQuestionMsg{
+		Questions: []AskUserQuestion{
+			{
+				Header:      "Scope",
+				Question:    "Select items",
+				MultiSelect: true,
+				Options: []AskUserOption{
+					{Label: "Alpha"},
+					{Label: "Beta"},
+				},
+			},
+		},
+		ResponseCh: respCh,
+	})
+
+	// 选中 Alpha -> 向下移到 Submit 行（2 options + 1 Type something = idx 3）-> Enter 提交
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// 渲染视图不应 panic
+	_ = m.View()
+
+	select {
+	case res := <-respCh:
+		if res.Cancelled || len(res.Answers) != 1 || len(res.Answers[0].Selected) != 1 || res.Answers[0].Selected[0] != "Alpha" {
+			t.Fatalf("unexpected AskUserResult: %+v", res)
+		}
+	default:
+		t.Fatalf("expected AskUserResult submitted on single multi-select question")
 	}
 }
 

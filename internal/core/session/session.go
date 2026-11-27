@@ -189,6 +189,22 @@ func (s *SessionTree) AppendCompaction(summary string, kept []ai.Message) *Sessi
 	})
 }
 
+// CompactionCount 返回当前会话中累计发生的上下文压缩次数（包含自动压缩、手动压缩与断点恢复的历史压缩）
+func (s *SessionTree) CompactionCount() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, e := range s.entries {
+		if e != nil && e.Type == EntryCompaction {
+			count++
+		}
+	}
+	return count
+}
+
 func sanitizeMessageToolCalls(m *ai.Message) {
 	if m == nil || len(m.ToolCalls) == 0 {
 		return

@@ -30,6 +30,7 @@ type childRunConfig struct {
 // runObservedChild 创建并执行带可观测 Hook 的子 Agent 实例
 func runObservedChild(ctx context.Context, cfg childRunConfig) (string, error) {
 	child := agent.NewAgent(cfg.childID, cfg.role, cfg.prov, cfg.modelName, cfg.reg)
+	child.SetSubagent(true)
 	child.SetCwd(cfg.cwd)
 	if cfg.session != nil {
 		child.SetSessionTree(cfg.session)

@@ -968,6 +968,9 @@ func (m *MainUIModel) handleLocalCommand(raw string) bool {
 	case "/mcp":
 		return m.handleMCPCommand(fields)
 
+	case "/ext":
+		return m.handleExtCommand(fields)
+
 	case "/compact":
 		if m.primaryBusy {
 			m.addSystemNotice("Cannot compact while agent is running.", true)

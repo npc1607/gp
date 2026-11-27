@@ -27,26 +27,39 @@ type Settings struct {
 	MaxConcurrency int      `json:"max_concurrency,omitempty"`
 	TokensPerMin   int      `json:"tokens_per_min,omitempty"`
 	SystemPrompt   string   `json:"system_prompt,omitempty"`
-	SkillDirs          []string `json:"skill_dirs,omitempty"`
-	DisabledSkills     []string `json:"disabled_skills,omitempty"`
-	UnregisteredSkills []string `json:"unregistered_skills,omitempty"`
-	DisabledMCPs       []string `json:"disabled_mcps,omitempty"`
+	SkillDirs                 []string `json:"skill_dirs,omitempty"`
+	DisabledSkills            []string `json:"disabled_skills,omitempty"`
+	UnregisteredSkills        []string `json:"unregistered_skills,omitempty"`
+	DisabledMCPs              []string `json:"disabled_mcps,omitempty"`
+	ExtensionMode             string   `json:"extension_mode,omitempty"` // "unified" (default) | "legacy"
+	ExtensionDirs             []string `json:"extension_dirs,omitempty"`
+	DisabledExtensions        []string `json:"disabled_extensions,omitempty"`
+	ExtensionAllowDestructive bool     `json:"extension_allow_destructive,omitempty"`
+}
+
+// IsLegacyExtensionMode 返回是否显式回退到旧版全量注入 MCP 模式
+func (s *Settings) IsLegacyExtensionMode() bool {
+	return s != nil && strings.EqualFold(strings.TrimSpace(s.ExtensionMode), "legacy")
 }
 
 // rawSettings 用于辅助 JSON 反序列化时区分 omitted 与 empty，防止未声明字段覆盖前序层叠值
 type rawSettings struct {
-	Model              *string   `json:"model"`
-	BaseURL            *string   `json:"base_url"`
-	APIKey             *string   `json:"api_key"`
-	ThinkingLevel      *string   `json:"thinking_level"`
-	DefaultTools       *[]string `json:"default_tools"`
-	MaxConcurrency     *int      `json:"max_concurrency"`
-	TokensPerMin       *int      `json:"tokens_per_min"`
-	SystemPrompt       *string   `json:"system_prompt"`
-	SkillDirs          *[]string `json:"skill_dirs"`
-	DisabledSkills     *[]string `json:"disabled_skills"`
-	UnregisteredSkills *[]string `json:"unregistered_skills"`
-	DisabledMCPs       *[]string `json:"disabled_mcps"`
+	Model                     *string   `json:"model"`
+	BaseURL                   *string   `json:"base_url"`
+	APIKey                    *string   `json:"api_key"`
+	ThinkingLevel             *string   `json:"thinking_level"`
+	DefaultTools              *[]string `json:"default_tools"`
+	MaxConcurrency            *int      `json:"max_concurrency"`
+	TokensPerMin              *int      `json:"tokens_per_min"`
+	SystemPrompt              *string   `json:"system_prompt"`
+	SkillDirs                 *[]string `json:"skill_dirs"`
+	DisabledSkills            *[]string `json:"disabled_skills"`
+	UnregisteredSkills        *[]string `json:"unregistered_skills"`
+	DisabledMCPs              *[]string `json:"disabled_mcps"`
+	ExtensionMode             *string   `json:"extension_mode"`
+	ExtensionDirs             *[]string `json:"extension_dirs"`
+	DisabledExtensions        *[]string `json:"disabled_extensions"`
+	ExtensionAllowDestructive *bool     `json:"extension_allow_destructive"`
 }
 
 // DefaultSettings 返回包含标准缺省值的配置对象
@@ -80,6 +93,12 @@ func (s Settings) Clone() Settings {
 	}
 	if s.DisabledMCPs != nil {
 		cloned.DisabledMCPs = append([]string(nil), s.DisabledMCPs...)
+	}
+	if s.ExtensionDirs != nil {
+		cloned.ExtensionDirs = append([]string(nil), s.ExtensionDirs...)
+	}
+	if s.DisabledExtensions != nil {
+		cloned.DisabledExtensions = append([]string(nil), s.DisabledExtensions...)
 	}
 	return cloned
 }
@@ -206,6 +225,18 @@ func (m *Manager) loadFromFile(path string, target *Settings) error {
 	if raw.DisabledMCPs != nil {
 		target.DisabledMCPs = append([]string(nil), (*raw.DisabledMCPs)...)
 	}
+	if raw.ExtensionMode != nil {
+		target.ExtensionMode = *raw.ExtensionMode
+	}
+	if raw.ExtensionDirs != nil {
+		target.ExtensionDirs = append([]string(nil), (*raw.ExtensionDirs)...)
+	}
+	if raw.DisabledExtensions != nil {
+		target.DisabledExtensions = append([]string(nil), (*raw.DisabledExtensions)...)
+	}
+	if raw.ExtensionAllowDestructive != nil {
+		target.ExtensionAllowDestructive = *raw.ExtensionAllowDestructive
+	}
 	return nil
 }
 
@@ -281,6 +312,29 @@ func (m *Manager) SaveToFile(path string, s Settings) error {
 // SaveGlobal 保存配置至全局配置文件 (~/.gp/settings.json)
 func (m *Manager) SaveGlobal(s Settings) error {
 	return m.SaveToFile(m.GlobalPath(), s)
+}
+
+// LoadGlobalOnly 仅读取全局配置文件 (~/.gp/settings.json)，不叠加默认值、项目级配置或环境变量
+func (m *Manager) LoadGlobalOnly() (*Settings, error) {
+	var s Settings
+	if err := m.loadFromFile(m.GlobalPath(), &s); err != nil {
+		return nil, fmt.Errorf("load global settings from %s: %w", m.GlobalPath(), err)
+	}
+	res := s.Clone()
+	return &res, nil
+}
+
+// UpdateGlobal 仅对全局配置文件中的字段执行增量修改，绝不将项目级配置或环境变量覆写进全局文件
+func (m *Manager) UpdateGlobal(mutate func(g *Settings)) error {
+	base, err := m.LoadGlobalOnly()
+	if err != nil {
+		return err
+	}
+	if base == nil {
+		base = &Settings{}
+	}
+	mutate(base)
+	return m.SaveGlobal(*base)
 }
 
 // SaveProject 保存配置至项目级配置文件 (<cwd>/.gp/settings.json)
